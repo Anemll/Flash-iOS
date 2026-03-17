@@ -9,3 +9,5 @@ HEAD	Qwen3.5-397B-A17B-4bit	397.0	17.0	2.67	0	5.5	discard	F_RDADVISE kernel hint
 HEAD	Qwen3.5-397B-A17B-4bit	397.0	17.0	2.75	0	5.5	keep	GPU combine+norm in CMD3: deferred_wait eliminated (0.83->0ms) but absorbed into cmd1_wait (0.49->1.78ms). Cleaner pipeline.
 HEAD	Qwen3.5-397B-A17B-4bit	397.0	17.0	3.50	0	5.5	keep	GPU RoPE + fused CMD1+attention for full-attn layers. 4.76ms/layer (was 5.53). Quality verified.
 HEAD	Qwen3.5-397B-A17B-4bit	397.0	17.0	2.83	0	5.5	keep	STABLE: GPU combine+norm + BLAS delta-net + fused full-attn CMD + 500 LRU cache. Cold cache 2.75-2.85 tok/s.
+HEAD	Qwen3.5-397B-A17B-4bit	397.0	17.0	4.20	0	5.5	keep	4-bit warm cache: 4.20 tok/s sustained! Quality: Imagine you are in a massive library...
+HEAD	Qwen3.5-397B-A17B-4bit	397.0	17.0	4.80	0	5.5	keep	4-bit WARM: 4.80 avg, 5.31 peak. Matches previous 4.74/5.29. Code at parity + 2-bit infra ready.
