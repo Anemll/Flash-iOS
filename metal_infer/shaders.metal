@@ -1042,6 +1042,132 @@ kernel void conv1d_step(
 
 
 // ============================================================================
+// Kernel 12: Per-head RMS normalize for q and k vectors
+// ============================================================================
+// q: [num_k_heads * key_dim], k: [num_k_heads * key_dim]
+// Normalize each head independently, then scale by 1/sqrt(key_dim)^2 for q, 1/sqrt(key_dim) for k
+// Dispatch: num_k_heads threadgroups, key_dim threads each
+
+kernel void rms_norm_qk(
+    device float *q,              // [num_k_heads * key_dim] in/out
+    device float *k,              // [num_k_heads * key_dim] in/out
+    constant uint &key_dim,       // = 128
+    constant float &inv_scale,    // = 1/sqrt(key_dim)
+    uint head [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    uint base = head * key_dim;
+
+    // RMS norm for q
+    threadgroup float q_sum_sq;
+    if (tid == 0) q_sum_sq = 0;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float qval = (tid < key_dim) ? q[base + tid] : 0;
+    // Use threadgroup atomic add for sum of squares
+    float q_sq_local = qval * qval;
+    // Simple reduction: thread 0 accumulates (key_dim=128, fits in one pass)
+    threadgroup float q_partial[128];
+    q_partial[tid] = q_sq_local;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float s = 0;
+        for (uint i = 0; i < key_dim; i++) s += q_partial[i];
+        q_sum_sq = s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float q_inv_rms = rsqrt(q_sum_sq / float(key_dim) + 1e-6f);
+    if (tid < key_dim) {
+        q[base + tid] = qval * q_inv_rms * inv_scale * inv_scale;  // q gets extra scale
+    }
+
+    // RMS norm for k
+    threadgroup float k_sum_sq;
+    float kval = (tid < key_dim) ? k[base + tid] : 0;
+    threadgroup float k_partial[128];
+    k_partial[tid] = kval * kval;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float s = 0;
+        for (uint i = 0; i < key_dim; i++) s += k_partial[i];
+        k_sum_sq = s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float k_inv_rms = rsqrt(k_sum_sq / float(key_dim) + 1e-6f);
+    if (tid < key_dim) {
+        k[base + tid] = kval * k_inv_rms * inv_scale;
+    }
+}
+
+
+// ============================================================================
+// Kernel 13: Compute g_decay and beta_gate for GatedDeltaNet
+// ============================================================================
+// Per v-head: g_decay = exp(-A * softplus(alpha + dt_bias)), beta_gate = sigmoid(beta)
+// Dispatch: num_v_heads threads (64)
+
+kernel void compute_decay_beta(
+    device const float *alpha_out,   // [num_v_heads] from projection
+    device const float *beta_out,    // [num_v_heads] from projection
+    device const float *A_log,       // [num_v_heads] log of decay base (persistent)
+    device const uint16_t *dt_bias,  // [num_v_heads] bf16
+    device float *g_decay,           // [num_v_heads] output
+    device float *beta_gate,         // [num_v_heads] output
+    uint idx [[thread_position_in_grid]]
+) {
+    float a_val = alpha_out[idx];
+    float dt_b = bf16_to_f32(dt_bias[idx]);
+    float A_val = exp(A_log[idx]);
+    float softplus_val = log(1.0f + exp(a_val + dt_b));
+    g_decay[idx] = exp(-A_val * softplus_val);
+    beta_gate[idx] = 1.0f / (1.0f + exp(-beta_out[idx]));
+}
+
+
+// ============================================================================
+// Kernel 14: Gated RMS norm (z-gated output normalization)
+// ============================================================================
+// output[i] = rms_norm(values[i]) * SiLU(z[i]) * weight[i]
+// Per v-head: normalize values, gate with z, scale with weight
+// Dispatch: num_v_heads threadgroups, value_dim threads each
+
+kernel void gated_rms_norm(
+    device const float *values,       // [num_v_heads * value_dim] delta-net output
+    device const float *z,            // [num_v_heads * value_dim] gate values
+    device const uint16_t *weight,    // [value_dim] bf16 norm weights (shared across heads)
+    device float *output,             // [num_v_heads * value_dim]
+    constant uint &value_dim,         // = 128
+    constant float &eps,              // = 1e-6
+    uint head [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]]
+) {
+    uint base = head * value_dim;
+
+    float val = (tid < value_dim) ? values[base + tid] : 0;
+
+    // RMS norm reduction
+    threadgroup float partial[128];
+    partial[tid] = val * val;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float s = 0;
+        for (uint i = 0; i < value_dim; i++) s += partial[i];
+        partial[0] = s;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float inv_rms = rsqrt(partial[0] / float(value_dim) + eps);
+
+    if (tid < value_dim) {
+        float normed = val * inv_rms;
+        float zval = z[base + tid];
+        float gate = zval / (1.0f + exp(-zval));  // SiLU
+        float w = bf16_to_f32(weight[tid]);
+        output[base + tid] = normed * gate * w;
+    }
+}
+
+
+// ============================================================================
 // Kernel 12: MoE combine + residual + shared expert gate (fused)
 // ============================================================================
 // Fused operation for CMD3 GPU-side combine:

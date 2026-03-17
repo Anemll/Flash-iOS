@@ -2,6 +2,7 @@
 """Encode a prompt to token IDs and write them to a binary file.
 Usage: python encode_prompt.py "Your prompt here" > prompt_tokens.bin
        python encode_prompt.py --text "Your prompt" --output prompt_tokens.bin
+       python encode_prompt.py --input-file prompt.txt --output prompt_tokens.bin
 """
 import sys
 import struct
@@ -11,11 +12,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('text', nargs='?', help='Prompt text')
     parser.add_argument('--text', '-t', dest='text_flag', help='Prompt text (flag form)')
+    parser.add_argument('--input-file', help='Read prompt text from a file')
     parser.add_argument('--output', '-o', default='prompt_tokens.bin')
     parser.add_argument('--model', default=None)
     args = parser.parse_args()
 
     text = args.text or args.text_flag
+    if args.input_file:
+        with open(args.input_file, 'r', encoding='utf-8') as f:
+            text = f.read()
     if not text:
         print("Usage: encode_prompt.py \"Your prompt here\"", file=sys.stderr)
         sys.exit(1)

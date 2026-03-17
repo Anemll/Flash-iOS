@@ -62,6 +62,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <signal.h>
+#include <sys/wait.h>
 
 // ============================================================================
 // Model constants
@@ -477,6 +478,67 @@ static PromptTokens *load_prompt_tokens(const char *path) {
     return pt;
 }
 
+static const char *find_encode_prompt_script(void) {
+    if (access("metal_infer/encode_prompt.py", R_OK) == 0) return "metal_infer/encode_prompt.py";
+    if (access("encode_prompt.py", R_OK) == 0) return "encode_prompt.py";
+    return NULL;
+}
+
+static int run_encode_prompt_script(const char *text_path, const char *tok_path) {
+    const char *script = find_encode_prompt_script();
+    if (!script) return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        execlp("python3", "python3", script,
+               "--input-file", text_path,
+               "--output", tok_path,
+               (char *)NULL);
+        _exit(127);
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    if (!WIFEXITED(status)) return -1;
+    return WEXITSTATUS(status);
+}
+
+static PromptTokens *encode_prompt_text_to_tokens(const char *text) {
+    char text_template[] = "/tmp/metal_infer_prompt_text_XXXXXX";
+    char tok_template[] = "/tmp/metal_infer_prompt_tokens_XXXXXX";
+
+    int text_fd = mkstemp(text_template);
+    if (text_fd < 0) return NULL;
+
+    FILE *tf = fdopen(text_fd, "w");
+    if (!tf) {
+        close(text_fd);
+        unlink(text_template);
+        return NULL;
+    }
+    if (fputs(text, tf) == EOF || fclose(tf) != 0) {
+        unlink(text_template);
+        return NULL;
+    }
+
+    int tok_fd = mkstemp(tok_template);
+    if (tok_fd < 0) {
+        unlink(text_template);
+        return NULL;
+    }
+    close(tok_fd);
+
+    PromptTokens *pt = NULL;
+    if (run_encode_prompt_script(text_template, tok_template) == 0) {
+        pt = load_prompt_tokens(tok_template);
+    }
+
+    unlink(text_template);
+    unlink(tok_template);
+    return pt;
+}
+
 // ============================================================================
 // CPU computation kernels
 // ============================================================================
@@ -755,6 +817,9 @@ typedef struct {
     // GPU delta-net (gated_delta_net_step) and conv1d pipelines
     id<MTLComputePipelineState> delta_net_step;  // gated_delta_net_step kernel
     id<MTLComputePipelineState> conv1d_step;     // conv1d_step kernel
+    id<MTLComputePipelineState> rms_norm_qk;     // per-head RMS normalize for q and k
+    id<MTLComputePipelineState> compute_decay_beta; // g_decay and beta_gate for delta-net
+    id<MTLComputePipelineState> gated_rms_norm;  // z-gated output normalization
     // Persistent GPU state buffers for linear attention layers
     #define NUM_LINEAR_LAYERS 45
     id<MTLBuffer> buf_delta_state[NUM_LINEAR_LAYERS];   // [64*128*128] float per layer
@@ -835,11 +900,17 @@ static MetalCtx *metal_setup(void) {
     ctx->attn_values_pipe  = makePipe(@"attn_values_batched");
     ctx->sigmoid_gate_pipe = makePipe(@"sigmoid_gate");
     ctx->moe_combine_residual = makePipe(@"moe_combine_residual");
-    ctx->delta_net_step = NULL; // makePipe(@"gated_delta_net_step"); // disabled: 195MB state causes GPU memory pressure
-    ctx->conv1d_step    = makePipe(@"conv1d_step");
+    ctx->delta_net_step    = makePipe(@"gated_delta_net_step");
+    ctx->conv1d_step       = makePipe(@"conv1d_step");
+    ctx->rms_norm_qk       = makePipe(@"rms_norm_qk");
+    ctx->compute_decay_beta = makePipe(@"compute_decay_beta");
+    ctx->gated_rms_norm    = makePipe(@"gated_rms_norm");
     if (!ctx->moe_combine_residual) fprintf(stderr, "[metal] WARNING: moe_combine_residual pipeline failed\n");
     if (!ctx->delta_net_step) fprintf(stderr, "[metal] WARNING: gated_delta_net_step pipeline failed (CPU fallback)\n");
     if (!ctx->conv1d_step)    fprintf(stderr, "[metal] WARNING: conv1d_step pipeline failed (CPU fallback)\n");
+    if (!ctx->rms_norm_qk)       fprintf(stderr, "[metal] WARNING: rms_norm_qk pipeline failed (CPU fallback)\n");
+    if (!ctx->compute_decay_beta) fprintf(stderr, "[metal] WARNING: compute_decay_beta pipeline failed (CPU fallback)\n");
+    if (!ctx->gated_rms_norm)     fprintf(stderr, "[metal] WARNING: gated_rms_norm pipeline failed (CPU fallback)\n");
 
     if (!ctx->matvec_v3 || !ctx->matvec_fast) {
         fprintf(stderr, "ERROR: Required Metal pipeline missing\n");
@@ -2133,6 +2204,7 @@ static void cpu_rms_norm_gated(const float *x, const float *z, const uint16_t *w
 }
 
 static int linear_attn_bypass = 0;  // set to 1 to skip linear attention (identity)
+static int gpu_linear_attn_enabled = 1;  // fused GPU delta-net path (can disable via --cpu-linear)
 
 __attribute__((unused))
 static void linear_attention_forward(
@@ -3581,10 +3653,17 @@ static float *s_shared_up  = NULL;  // [SHARED_INTERMEDIATE]
 static float *s_moe_out   = NULL;   // [HIDDEN_DIM]
 static float *s_shared_out = NULL;  // [HIDDEN_DIM]
 // Full attention scratch
+static float *s_q_proj_out = NULL;  // [NUM_ATTN_HEADS * HEAD_DIM * 2]
+static float *s_k_proj_out = NULL;  // [NUM_KV_HEADS * HEAD_DIM]
+static float *s_v_proj_out = NULL;  // [NUM_KV_HEADS * HEAD_DIM]
 static float *s_q         = NULL;   // [NUM_ATTN_HEADS * HEAD_DIM]
 static float *s_q_gate    = NULL;   // [NUM_ATTN_HEADS * HEAD_DIM]
 static float *s_attn_out  = NULL;   // [NUM_ATTN_HEADS * HEAD_DIM]
 // Linear attention scratch
+static float *s_qkv_proj_out = NULL;   // [LINEAR_CONV_DIM]
+static float *s_z_proj_out   = NULL;   // [LINEAR_TOTAL_VALUE]
+static float *s_beta_proj_out = NULL;  // [LINEAR_NUM_V_HEADS]
+static float *s_alpha_proj_out = NULL; // [LINEAR_NUM_V_HEADS]
 static float *s_conv_out  = NULL;   // [LINEAR_CONV_DIM]
 static float *s_out_vals  = NULL;   // [LINEAR_TOTAL_VALUE]
 static float *s_gated_out = NULL;   // [LINEAR_TOTAL_VALUE]
@@ -3602,9 +3681,16 @@ static void init_layer_scratch(void) {
     s_shared_up  = calloc(SHARED_INTERMEDIATE, sizeof(float));
     s_moe_out    = calloc(HIDDEN_DIM, sizeof(float));
     s_shared_out = calloc(HIDDEN_DIM, sizeof(float));
+    s_q_proj_out = calloc(NUM_ATTN_HEADS * HEAD_DIM * 2, sizeof(float));
+    s_k_proj_out = calloc(NUM_KV_HEADS * HEAD_DIM, sizeof(float));
+    s_v_proj_out = calloc(NUM_KV_HEADS * HEAD_DIM, sizeof(float));
     s_q          = calloc(NUM_ATTN_HEADS * HEAD_DIM, sizeof(float));
     s_q_gate     = calloc(NUM_ATTN_HEADS * HEAD_DIM, sizeof(float));
     s_attn_out   = calloc(NUM_ATTN_HEADS * HEAD_DIM, sizeof(float));
+    s_qkv_proj_out = calloc(LINEAR_CONV_DIM, sizeof(float));
+    s_z_proj_out   = calloc(LINEAR_TOTAL_VALUE, sizeof(float));
+    s_beta_proj_out = calloc(LINEAR_NUM_V_HEADS, sizeof(float));
+    s_alpha_proj_out = calloc(LINEAR_NUM_V_HEADS, sizeof(float));
     s_conv_out   = calloc(LINEAR_CONV_DIM, sizeof(float));
     s_out_vals   = calloc(LINEAR_TOTAL_VALUE, sizeof(float));
     s_gated_out  = calloc(LINEAR_TOTAL_VALUE, sizeof(float));
@@ -3643,9 +3729,9 @@ static void fused_layer_forward(
         int q_proj_dim = NUM_ATTN_HEADS * HEAD_DIM * 2;
         int kv_dim = NUM_KV_HEADS * HEAD_DIM;
 
-        q_proj_out = calloc(q_proj_dim, sizeof(float));
-        k_out = calloc(kv_dim, sizeof(float));
-        v_out = calloc(kv_dim, sizeof(float));
+        q_proj_out = s_q_proj_out;
+        k_out = s_k_proj_out;
+        v_out = s_v_proj_out;
 
         if (lc->q_w && lc->q_s && lc->q_b && lc->k_w && lc->k_s && lc->k_b &&
             lc->v_w && lc->v_s && lc->v_b) {
@@ -3658,10 +3744,10 @@ static void fused_layer_forward(
         int qkv_dim = LINEAR_CONV_DIM;
         int z_dim = LINEAR_TOTAL_VALUE;
 
-        qkv_out = calloc(qkv_dim, sizeof(float));
-        z_out = calloc(z_dim, sizeof(float));
-        beta_out = calloc(LINEAR_NUM_V_HEADS, sizeof(float));
-        alpha_out = calloc(LINEAR_NUM_V_HEADS, sizeof(float));
+        qkv_out = s_qkv_proj_out;
+        z_out = s_z_proj_out;
+        beta_out = s_beta_proj_out;
+        alpha_out = s_alpha_proj_out;
 
         if (lc->qkv_w && lc->qkv_s && lc->qkv_b && lc->z_w && lc->z_s && lc->z_b &&
             lc->b_w && lc->b_s && lc->b_b && lc->a_w && lc->a_s && lc->a_b) {
@@ -3677,6 +3763,22 @@ static void fused_layer_forward(
     float *normed = s_normed;
     float *residual = s_residual;
     id<MTLCommandBuffer> cmd1 = nil;
+    int gpu_linear_attn = 0;  // set to 1 if GPU handles entire linear attention pipeline
+
+    // Pre-compute linear_layer_idx for GPU linear attention encoding in CMD1
+    int linear_layer_idx = -1;
+    if (!is_full) {
+        linear_layer_idx = layer_idx - (layer_idx + 1) / FULL_ATTN_INTERVAL;
+    }
+    // Can we run the full linear attention pipeline on GPU in CMD1?
+    int can_gpu_linear = (gpu_linear_attn_enabled &&
+                          !is_full && g_metal && g_metal->delta_net_step &&
+                          g_metal->conv1d_step && g_metal->rms_norm_qk &&
+                          g_metal->compute_decay_beta && g_metal->gated_rms_norm &&
+                          g_metal->wf_buf &&
+                          linear_layer_idx >= 0 && linear_layer_idx < NUM_LINEAR_LAYERS &&
+                          lc->conv1d_w && lc->A_log && lc->dt_bias && lc->gated_norm_w &&
+                          !linear_attn_bypass);
 
     // Check if previous layer's CMD3 already computed combine+residual+norm on GPU.
     // If so, buf_input already contains the normalized input for this layer's CMD1.
@@ -3691,6 +3793,99 @@ static void fused_layer_forward(
 
         cmd1 = [g_metal->queue commandBuffer];
         gpu_encode_batch_matvec(g_metal, cmd1, attn_specs, num_attn_specs);
+
+        // GPU linear attention: encode conv1d + normalize + decay/beta + delta-net + gated_norm into CMD1
+        if (can_gpu_linear && num_attn_specs == 4) {
+            // batch_out[0]=qkv(12288), [1]=z(8192), [2]=beta(64), [3]=alpha(64)
+            uint32_t conv_dim = LINEAR_CONV_DIM;
+            NSUInteger conv_w_off = (NSUInteger)((const char *)lc->conv1d_w - (const char *)[g_metal->wf_buf contents]);
+
+            // Enc L1: conv1d_step — input=batch_out[0], weights=conv1d_w, state=buf_conv_state, output=buf_conv_output
+            {
+                id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
+                [enc setComputePipelineState:g_metal->conv1d_step];
+                [enc setBuffer:g_metal->buf_conv_state[linear_layer_idx] offset:0 atIndex:0];
+                [enc setBuffer:g_metal->batch_out[0]    offset:0            atIndex:1]; // qkv projection output
+                [enc setBuffer:g_metal->wf_buf          offset:conv_w_off   atIndex:2]; // conv weights (bf16)
+                [enc setBuffer:g_metal->buf_conv_output offset:0            atIndex:3]; // conv output
+                [enc setBytes:&conv_dim length:4 atIndex:4];
+                uint32_t tgs = (conv_dim + 255) / 256;
+                [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [enc endEncoding];
+            }
+
+            // Enc L2: rms_norm_qk — normalize q and k in conv_output in-place
+            {
+                uint32_t key_dim = LINEAR_KEY_DIM;  // 128
+                float inv_scale = 1.0f / sqrtf((float)LINEAR_KEY_DIM);
+                id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
+                [enc setComputePipelineState:g_metal->rms_norm_qk];
+                [enc setBuffer:g_metal->buf_conv_output offset:0 atIndex:0];  // q at offset 0
+                [enc setBuffer:g_metal->buf_conv_output offset:LINEAR_TOTAL_KEY * sizeof(float) atIndex:1];  // k at offset 2048 floats
+                [enc setBytes:&key_dim   length:4 atIndex:2];
+                [enc setBytes:&inv_scale length:4 atIndex:3];
+                [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_K_HEADS, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(LINEAR_KEY_DIM, 1, 1)];
+                [enc endEncoding];
+            }
+
+            // Enc L3: compute_decay_beta — alpha=batch_out[3], beta=batch_out[2], A_log+dt_bias from wf_buf
+            {
+                NSUInteger a_log_off   = (NSUInteger)((const char *)lc->A_log   - (const char *)[g_metal->wf_buf contents]);
+                NSUInteger dt_bias_off = (NSUInteger)((const char *)lc->dt_bias  - (const char *)[g_metal->wf_buf contents]);
+                id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
+                [enc setComputePipelineState:g_metal->compute_decay_beta];
+                [enc setBuffer:g_metal->batch_out[3]       offset:0          atIndex:0]; // alpha
+                [enc setBuffer:g_metal->batch_out[2]       offset:0          atIndex:1]; // beta
+                [enc setBuffer:g_metal->wf_buf             offset:a_log_off  atIndex:2]; // A_log
+                [enc setBuffer:g_metal->wf_buf             offset:dt_bias_off atIndex:3]; // dt_bias (bf16)
+                [enc setBuffer:g_metal->buf_delta_g_decay  offset:0          atIndex:4]; // g_decay output
+                [enc setBuffer:g_metal->buf_delta_beta     offset:0          atIndex:5]; // beta_gate output
+                [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)];
+                [enc endEncoding];
+            }
+
+            // Enc L4: gated_delta_net_step — the main recurrence
+            {
+                uint32_t khpv = LINEAR_NUM_V_HEADS / LINEAR_NUM_K_HEADS;  // 4
+                id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
+                [enc setComputePipelineState:g_metal->delta_net_step];
+                [enc setBuffer:g_metal->buf_delta_state[linear_layer_idx] offset:0 atIndex:0]; // persistent state
+                [enc setBuffer:g_metal->buf_conv_output offset:0 atIndex:1]; // q (first 2048 floats)
+                [enc setBuffer:g_metal->buf_conv_output offset:LINEAR_TOTAL_KEY * sizeof(float) atIndex:2]; // k (next 2048)
+                [enc setBuffer:g_metal->buf_conv_output offset:2 * LINEAR_TOTAL_KEY * sizeof(float) atIndex:3]; // v (next 8192)
+                [enc setBuffer:g_metal->buf_delta_g_decay offset:0 atIndex:4];
+                [enc setBuffer:g_metal->buf_delta_beta    offset:0 atIndex:5];
+                [enc setBuffer:g_metal->buf_delta_output  offset:0 atIndex:6]; // output [8192]
+                [enc setBytes:&khpv length:sizeof(khpv) atIndex:7];
+                [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [enc endEncoding];
+            }
+
+            // Enc L5: gated_rms_norm — normalize+gate delta-net output -> batch_out[6] for CMD2 o_proj
+            {
+                NSUInteger gnorm_w_off = (NSUInteger)((const char *)lc->gated_norm_w - (const char *)[g_metal->wf_buf contents]);
+                uint32_t value_dim = LINEAR_VALUE_DIM;  // 128
+                float eps = RMS_NORM_EPS;
+                id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
+                [enc setComputePipelineState:g_metal->gated_rms_norm];
+                [enc setBuffer:g_metal->buf_delta_output offset:0          atIndex:0]; // values [8192]
+                [enc setBuffer:g_metal->batch_out[1]     offset:0          atIndex:1]; // z (z projection output) [8192]
+                [enc setBuffer:g_metal->wf_buf           offset:gnorm_w_off atIndex:2]; // weight (bf16)
+                [enc setBuffer:g_metal->batch_out[6]     offset:0          atIndex:3]; // output -> batch_out[6] for CMD2
+                [enc setBytes:&value_dim length:4 atIndex:4];
+                [enc setBytes:&eps       length:4 atIndex:5];
+                [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(LINEAR_VALUE_DIM, 1, 1)];
+                [enc endEncoding];
+            }
+
+            gpu_linear_attn = 1;
+        }
+
         [cmd1 commit];
 
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd1_submit += t1 - t0; }
@@ -3698,7 +3893,9 @@ static void fused_layer_forward(
         // Wait for CMD1 (implies CMD3(N-1) also done, since queue is serial)
         if (g_timing_enabled) { t0 = now_ms(); }
         [cmd1 waitUntilCompleted];
-        gpu_flush_batch_results(g_metal, attn_specs, num_attn_specs);
+        if (!gpu_linear_attn) {
+            gpu_flush_batch_results(g_metal, attn_specs, num_attn_specs);
+        }
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd1_wait += t1 - t0; }
 
         // Now CMD3(N-1) is done. Read back hidden state from GPU.
@@ -3734,6 +3931,98 @@ static void fused_layer_forward(
             memcpy([g_metal->buf_input contents], normed, HIDDEN_DIM * sizeof(float));
             cmd1 = [g_metal->queue commandBuffer];
             gpu_encode_batch_matvec(g_metal, cmd1, attn_specs, num_attn_specs);
+
+            // GPU linear attention: encode conv1d + normalize + decay/beta + delta-net + gated_norm into CMD1
+            if (can_gpu_linear && num_attn_specs == 4) {
+                uint32_t conv_dim = LINEAR_CONV_DIM;
+                NSUInteger conv_w_off = (NSUInteger)((const char *)lc->conv1d_w - (const char *)[g_metal->wf_buf contents]);
+
+                // Enc L1: conv1d_step
+                {
+                    id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
+                    [enc setComputePipelineState:g_metal->conv1d_step];
+                    [enc setBuffer:g_metal->buf_conv_state[linear_layer_idx] offset:0 atIndex:0];
+                    [enc setBuffer:g_metal->batch_out[0]    offset:0            atIndex:1];
+                    [enc setBuffer:g_metal->wf_buf          offset:conv_w_off   atIndex:2];
+                    [enc setBuffer:g_metal->buf_conv_output offset:0            atIndex:3];
+                    [enc setBytes:&conv_dim length:4 atIndex:4];
+                    uint32_t tgs = (conv_dim + 255) / 256;
+                    [enc dispatchThreadgroups:MTLSizeMake(tgs, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [enc endEncoding];
+                }
+
+                // Enc L2: rms_norm_qk
+                {
+                    uint32_t key_dim = LINEAR_KEY_DIM;
+                    float inv_scale = 1.0f / sqrtf((float)LINEAR_KEY_DIM);
+                    id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
+                    [enc setComputePipelineState:g_metal->rms_norm_qk];
+                    [enc setBuffer:g_metal->buf_conv_output offset:0 atIndex:0];
+                    [enc setBuffer:g_metal->buf_conv_output offset:LINEAR_TOTAL_KEY * sizeof(float) atIndex:1];
+                    [enc setBytes:&key_dim   length:4 atIndex:2];
+                    [enc setBytes:&inv_scale length:4 atIndex:3];
+                    [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_K_HEADS, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(LINEAR_KEY_DIM, 1, 1)];
+                    [enc endEncoding];
+                }
+
+                // Enc L3: compute_decay_beta
+                {
+                    NSUInteger a_log_off   = (NSUInteger)((const char *)lc->A_log   - (const char *)[g_metal->wf_buf contents]);
+                    NSUInteger dt_bias_off = (NSUInteger)((const char *)lc->dt_bias  - (const char *)[g_metal->wf_buf contents]);
+                    id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
+                    [enc setComputePipelineState:g_metal->compute_decay_beta];
+                    [enc setBuffer:g_metal->batch_out[3]       offset:0          atIndex:0];
+                    [enc setBuffer:g_metal->batch_out[2]       offset:0          atIndex:1];
+                    [enc setBuffer:g_metal->wf_buf             offset:a_log_off  atIndex:2];
+                    [enc setBuffer:g_metal->wf_buf             offset:dt_bias_off atIndex:3];
+                    [enc setBuffer:g_metal->buf_delta_g_decay  offset:0          atIndex:4];
+                    [enc setBuffer:g_metal->buf_delta_beta     offset:0          atIndex:5];
+                    [enc dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)];
+                    [enc endEncoding];
+                }
+
+                // Enc L4: gated_delta_net_step
+                {
+                    uint32_t khpv = LINEAR_NUM_V_HEADS / LINEAR_NUM_K_HEADS;
+                    id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
+                    [enc setComputePipelineState:g_metal->delta_net_step];
+                    [enc setBuffer:g_metal->buf_delta_state[linear_layer_idx] offset:0 atIndex:0];
+                    [enc setBuffer:g_metal->buf_conv_output offset:0 atIndex:1];
+                    [enc setBuffer:g_metal->buf_conv_output offset:LINEAR_TOTAL_KEY * sizeof(float) atIndex:2];
+                    [enc setBuffer:g_metal->buf_conv_output offset:2 * LINEAR_TOTAL_KEY * sizeof(float) atIndex:3];
+                    [enc setBuffer:g_metal->buf_delta_g_decay offset:0 atIndex:4];
+                    [enc setBuffer:g_metal->buf_delta_beta    offset:0 atIndex:5];
+                    [enc setBuffer:g_metal->buf_delta_output  offset:0 atIndex:6];
+                    [enc setBytes:&khpv length:sizeof(khpv) atIndex:7];
+                    [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                    [enc endEncoding];
+                }
+
+                // Enc L5: gated_rms_norm -> batch_out[6]
+                {
+                    NSUInteger gnorm_w_off = (NSUInteger)((const char *)lc->gated_norm_w - (const char *)[g_metal->wf_buf contents]);
+                    uint32_t value_dim = LINEAR_VALUE_DIM;
+                    float eps = RMS_NORM_EPS;
+                    id<MTLComputeCommandEncoder> enc = [cmd1 computeCommandEncoder];
+                    [enc setComputePipelineState:g_metal->gated_rms_norm];
+                    [enc setBuffer:g_metal->buf_delta_output offset:0          atIndex:0];
+                    [enc setBuffer:g_metal->batch_out[1]     offset:0          atIndex:1];
+                    [enc setBuffer:g_metal->wf_buf           offset:gnorm_w_off atIndex:2];
+                    [enc setBuffer:g_metal->batch_out[6]     offset:0          atIndex:3];
+                    [enc setBytes:&value_dim length:4 atIndex:4];
+                    [enc setBytes:&eps       length:4 atIndex:5];
+                    [enc dispatchThreadgroups:MTLSizeMake(LINEAR_NUM_V_HEADS, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(LINEAR_VALUE_DIM, 1, 1)];
+                    [enc endEncoding];
+                }
+
+                gpu_linear_attn = 1;
+            }
+
             [cmd1 commit];
         } else {
             for (int i = 0; i < num_attn_specs; i++) {
@@ -3748,7 +4037,9 @@ static void fused_layer_forward(
         if (g_timing_enabled) { t0 = now_ms(); }
         if (cmd1) {
             [cmd1 waitUntilCompleted];
-            gpu_flush_batch_results(g_metal, attn_specs, num_attn_specs);
+            if (!gpu_linear_attn) {
+                gpu_flush_batch_results(g_metal, attn_specs, num_attn_specs);
+            }
         }
         if (g_timing_enabled) { t1 = now_ms(); g_timing.cmd1_wait += t1 - t0; }
     }
@@ -3975,10 +4266,13 @@ static void fused_layer_forward(
         } else {
             attn_out_for_oproj = attn_out;
         }
-        // q, q_gate, attn_out are static — no free needed
-        free(q_proj_out);
-        free(k_out);
-        free(v_out);
+        // q_proj_out, k_out, v_out, q, q_gate, attn_out are static scratch.
+    } else if (gpu_linear_attn) {
+        // ---- GPU linear attention: already computed in CMD1 ----
+        // batch_out[6] already contains gated_rms_norm output (8192 floats)
+        // Set a non-NULL sentinel so CMD2 enters fused path, but skip the memcpy
+        static float gpu_linear_sentinel;
+        attn_out_for_oproj = &gpu_linear_sentinel;
     } else {
         // ---- Linear attention CPU compute ----
         if (!linear_attn_bypass) {
@@ -4136,11 +4430,7 @@ static void fused_layer_forward(
             // gated_out is static — freed/released after CMD2 submission below
         }
         // else: linear_attn_bypass — attn_projected stays zero
-
-        free(qkv_out);
-        free(z_out);
-        free(beta_out);
-        free(alpha_out);
+        // qkv_out, z_out, beta_out, alpha_out are static scratch.
     }
 
     // =====================================================================
@@ -4200,11 +4490,12 @@ static void fused_layer_forward(
         //   Enc 2-4: residual + norm -> buf_input
         //   Enc 5-8: routing + shared expert
 
-        if (!gpu_attn_fuse) {
+        if (!gpu_attn_fuse && !gpu_linear_attn) {
             // CPU/linear attn: copy attention output to GPU input buffer
             memcpy([g_metal->batch_out[6] contents], attn_out_for_oproj,
                    oproj_in_dim * sizeof(float));
         }
+        // gpu_linear_attn: batch_out[6] already has the result from CMD1 gated_rms_norm
         // Copy residual into GPU buffer for residual_add kernel
         memcpy([g_metal->buf_residual contents], residual, HIDDEN_DIM * sizeof(float));
 
@@ -5088,31 +5379,19 @@ static const char *CORS_RESPONSE =
 // Tokenize a chat message using the Qwen3 template via encode_prompt.py.
 // Writes binary token file and loads it. Caller must free returned PromptTokens.
 static PromptTokens *tokenize_chat_message(const char *user_content) {
-    const char *text_path = "/tmp/serve_input_text.txt";
-    const char *tok_path  = "/tmp/serve_input_tokens.bin";
-
-    FILE *tf = fopen(text_path, "w");
-    if (!tf) return NULL;
-    fprintf(tf,
+    const char *prefix =
         "<|im_start|>system\nYou are a helpful assistant. /think<|im_end|>\n"
-        "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n",
-        user_content);
-    fclose(tf);
+        "<|im_start|>user\n";
+    const char *suffix = "<|im_end|>\n<|im_start|>assistant\n";
 
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd),
-        "python3 metal_infer/encode_prompt.py \"$(cat %s)\" -o %s 2>/dev/null",
-        text_path, tok_path);
-    int rc = system(cmd);
-    if (rc != 0) {
-        snprintf(cmd, sizeof(cmd),
-            "python3 encode_prompt.py \"$(cat %s)\" -o %s 2>/dev/null",
-            text_path, tok_path);
-        rc = system(cmd);
-    }
-    if (rc != 0) return NULL;
+    size_t prompt_len = strlen(prefix) + strlen(user_content) + strlen(suffix) + 1;
+    char *prompt = malloc(prompt_len);
+    if (!prompt) return NULL;
 
-    return load_prompt_tokens(tok_path);
+    snprintf(prompt, prompt_len, "%s%s%s", prefix, user_content, suffix);
+    PromptTokens *pt = encode_prompt_text_to_tokens(prompt);
+    free(prompt);
+    return pt;
 }
 
 // The main serve loop. Model state must already be initialized.
@@ -5367,9 +5646,11 @@ static void print_usage(const char *prog) {
     printf("  --k N                Active experts per layer (default: 4)\n");
     printf("  --cache-entries N    Expert LRU cache size (default: 1500, 0 = disabled)\n");
     printf("  --malloc-cache N     Malloc expert cache entries (e.g., 2581 = 17GB for 80%% hit)\n");
+    printf("  --cpu-linear         Disable fused GPU delta-net and use the older CPU/hybrid linear path\n");
     printf("  --timing             Enable per-layer timing breakdown\n");
     printf("  --freq               Enable expert frequency tracking + analysis\n");
     printf("  --2bit               Use 2-bit quantized experts (packed_experts_2bit/)\n");
+    printf("  --gpu-linear         Alias for the fused GPU delta-net path (default)\n");
     printf("  --serve PORT         Run HTTP server (OpenAI-compatible API)\n");
     printf("  --help               This message\n");
 }
@@ -5399,17 +5680,19 @@ int main(int argc, char **argv) {
             {"k",             required_argument, 0, 'k'},
             {"cache-entries",  required_argument, 0, 'C'},
             {"malloc-cache",   required_argument, 0, 'M'},
+            {"cpu-linear",    no_argument,       0, 'L'},
             {"skip-linear",   no_argument,       0, 'S'},
             {"timing",        no_argument,       0, 'T'},
             {"freq",          no_argument,       0, 'F'},
             {"2bit",          no_argument,       0, '2'},
+            {"gpu-linear",    no_argument,       0, 'G'},
             {"serve",         required_argument, 0, 'R'},
             {"help",          no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
 
         int c;
-        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:STF2h", long_options, NULL)) != -1) {
+        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:LSTF2Gh", long_options, NULL)) != -1) {
             switch (c) {
                 case 'm': model_path = optarg; break;
                 case 'w': weights_path = optarg; break;
@@ -5421,10 +5704,12 @@ int main(int argc, char **argv) {
                 case 'k': K = atoi(optarg); break;
                 case 'C': cache_entries = atoi(optarg); break;
                 case 'M': malloc_cache_entries = atoi(optarg); break;
+                case 'L': gpu_linear_attn_enabled = 0; break;
                 case 'S': linear_attn_bypass = 1; break;
                 case 'T': g_timing_enabled = 1; break;
                 case 'F': g_freq_tracking = 1; break;
                 case '2': g_use_2bit = 1; break;
+                case 'G': gpu_linear_attn_enabled = 1; break;
                 case 'R': serve_port = atoi(optarg); break;
                 case 'h': print_usage(argv[0]); return 0;
                 default:  print_usage(argv[0]); return 1;
@@ -5433,7 +5718,6 @@ int main(int argc, char **argv) {
 
         // Build default paths
         char default_weights[1024], default_manifest[1024], default_vocab[1024];
-        char default_prompt_tokens[1024];
 
         // Try to find files relative to the executable
         if (!weights_path) {
@@ -5491,6 +5775,7 @@ int main(int argc, char **argv) {
         printf("Vocab:    %s\n", vocab_path);
         printf("K:        %d experts/layer\n", K);
         printf("Quant:    %s experts (%zu bytes each)\n", g_use_2bit ? "2-bit" : "4-bit", active_expert_size());
+        printf("Linear:   %s\n", gpu_linear_attn_enabled ? "fused GPU delta-net" : "CPU/hybrid fallback");
         printf("Tokens:   %d\n", max_tokens);
         if (g_malloc_cache) {
             printf("Cache:    malloc %d entries (%.1f GB)\n",
@@ -5525,51 +5810,21 @@ int main(int argc, char **argv) {
         PromptTokens *pt = NULL;
         if (serve_port == 0) {
             if (prompt_text) {
-                // Encode via Python helper
-                snprintf(default_prompt_tokens, sizeof(default_prompt_tokens),
-                         "/tmp/metal_infer_prompt.bin");
-                char cmd[4096];
-                snprintf(cmd, sizeof(cmd),
-                         "python3 metal_infer/encode_prompt.py \"%s\" -o %s 2>/dev/null",
-                         prompt_text, default_prompt_tokens);
-                int rc = system(cmd);
-                if (rc != 0) {
-                    // Try from working directory
-                    snprintf(cmd, sizeof(cmd),
-                             "python3 encode_prompt.py \"%s\" -o %s 2>/dev/null",
-                             prompt_text, default_prompt_tokens);
-                    rc = system(cmd);
-                }
-                if (rc != 0) {
+                pt = encode_prompt_text_to_tokens(prompt_text);
+                if (!pt) {
                     fprintf(stderr, "ERROR: Failed to encode prompt. Make sure encode_prompt.py exists.\n");
                     return 1;
                 }
-                prompt_tokens_path = default_prompt_tokens;
-            }
-
-            if (!prompt_tokens_path) {
-                // Default prompt
-                snprintf(default_prompt_tokens, sizeof(default_prompt_tokens),
-                         "/tmp/metal_infer_prompt.bin");
-                char cmd[4096];
-                snprintf(cmd, sizeof(cmd),
-                         "python3 metal_infer/encode_prompt.py \"Hello, what is\" -o %s 2>/dev/null",
-                         default_prompt_tokens);
-                int rc = system(cmd);
-                if (rc != 0) {
-                    snprintf(cmd, sizeof(cmd),
-                             "python3 encode_prompt.py \"Hello, what is\" -o %s 2>/dev/null",
-                             default_prompt_tokens);
-                    rc = system(cmd);
-                }
-                if (rc != 0) {
+            } else if (!prompt_tokens_path) {
+                pt = encode_prompt_text_to_tokens("Hello, what is");
+                if (!pt) {
                     fprintf(stderr, "ERROR: No prompt tokens and encode_prompt.py not found\n");
                     return 1;
                 }
-                prompt_tokens_path = default_prompt_tokens;
+            } else {
+                pt = load_prompt_tokens(prompt_tokens_path);
             }
 
-            pt = load_prompt_tokens(prompt_tokens_path);
             if (!pt) {
                 fprintf(stderr, "ERROR: Failed to load prompt tokens from %s\n", prompt_tokens_path);
                 return 1;
