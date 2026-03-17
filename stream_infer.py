@@ -1517,7 +1517,8 @@ def generate_offload_selective(model, tokenizer, prompt, max_tokens, weight_inde
                                batch_layers=0,
                                numpy_cache_gb=0.0,
                                two_pass=False,
-                               single_eval=False):
+                               single_eval=False,
+                               fast_load=False):
     """Generate tokens with selective expert loading for MoE models.
 
     At startup: pre-load all non-expert weights (~2.3GB) for all layers into DRAM.
@@ -1619,6 +1620,59 @@ def generate_offload_selective(model, tokenizer, prompt, max_tokens, weight_inde
             is_bf16 = comp["dtype"] == "BF16"
             _packed_comps.append((parts[0], parts[1], comp["offset"], comp["size"],
                                   np_dtype, tuple(comp["shape"]), is_bf16))
+
+    # === fast_weight_load C extension: pre-allocated Metal buffers + parallel pread ===
+    _fwl_buffers = None
+    _fwl_active = False
+    if fast_load and single_eval and packed_layout is not None:
+        try:
+            import fast_weight_load
+            # Map layout dtype strings to MLX dtype attribute names
+            _fwl_dtype_map = {
+                'U32': 'uint32',
+                'F32': 'float32',
+                'BF16': 'uint16',  # read as uint16, .view(mx.bfloat16) at use time
+                'F16': 'float16',
+                'I32': 'int32',
+            }
+            # Build component specs for C extension (list of dicts)
+            _fwl_components = []
+            for comp in packed_layout["components"]:
+                _fwl_components.append({
+                    'name': comp['name'],
+                    'offset': comp['offset'],
+                    'size': comp['size'],
+                    'shape': comp['shape'],
+                    'dtype': _fwl_dtype_map[comp['dtype']],
+                })
+
+            packed_dir = str(Path(model_path) / "packed_experts")
+            expert_size = packed_layout["expert_size"]
+
+            fast_weight_load.init(num_workers=8)
+            _fwl_buffers = fast_weight_load.prealloc(
+                num_layers, active_experts, _fwl_components,
+                packed_dir, expert_size)
+            _fwl_active = True
+
+            import atexit as _fwl_atexit
+            _fwl_atexit.register(fast_weight_load.shutdown)
+
+            print(f"  [fast-load] C extension initialized: {num_layers} layers x "
+                  f"{active_experts} slots x {len(_fwl_components)} components. "
+                  f"Pre-allocated Metal buffers for zero-copy pread.")
+        except ImportError:
+            print(f"  [fast-load] DISABLED — fast_weight_load.so not found. "
+                  f"Build with: python setup_fwl.py build_ext --inplace")
+        except Exception as e:
+            print(f"  [fast-load] DISABLED — init failed: {e}")
+    elif fast_load:
+        missing = []
+        if not single_eval:
+            missing.append("--single-eval")
+        if packed_layout is None:
+            missing.append("packed expert files")
+        print(f"  [fast-load] DISABLED — requires: {', '.join(missing)}")
 
     if no_expert_cache:
         print(f"  [no-expert-cache] Skipping ExpertCache — OS page cache handles all expert reads.")
@@ -1742,8 +1796,9 @@ def generate_offload_selective(model, tokenizer, prompt, max_tokens, weight_inde
         print(f"  [two-pass] DISABLED — requires: {', '.join(missing)}")
     elif use_two_pass:
         if single_eval:
+            _se_io_label = "fast_weight_load C ext (parallel pread into Metal buffers)" if _fwl_active else "pre-read superset"
             print(f"  [two-pass+single-eval] Pass 1 = routing scout (2x superset + top-K), "
-                  f"Batch I/O = pre-read superset, Pass 2 = FULLY LAZY expert compute "
+                  f"Batch I/O = {_se_io_label}, Pass 2 = FULLY LAZY expert compute "
                   f"(single mx.eval for all {num_layers} layers). No per-layer routing eval.")
         else:
             print(f"  [two-pass] Speculative superset: Pass 1 = routing scout (2x superset), "
@@ -2020,144 +2075,268 @@ def generate_offload_selective(model, tokenizer, prompt, max_tokens, weight_inde
                 _se_io_total = 0.0
                 _se_convert_total = 0.0
 
-                for i in range(num_layers):
-                    if i not in all_superset_info:
-                        if i in all_pass1_data:
-                            layer = layers[i]
-                            c = cache[i]
-                            x_normed = layer.input_layernorm(h)
-                            mask = ssm_mask if layer.is_linear else fa_mask
-                            r = layer.linear_attn(x_normed, mask, c) if layer.is_linear else layer.self_attn(x_normed, mask, c)
-                            h = h + r
-                        continue
+                # ---- FAST-LOAD PATH: batch all expert I/O via C extension ----
+                # Build routing decisions for ALL layers first, then dispatch
+                # one C call to fill all pre-allocated Metal buffers in parallel.
+                if _fwl_active:
+                    # Pre-compute routing for all MoE layers
+                    _fwl_routing = {}  # layer_idx -> (unique_list, remap, remapped_inds, scores_topk_i)
+                    _fwl_load_list = []
 
-                    superset_list, superset_set, _, k_i = all_superset_info[i]
-                    layer = layers[i]
-                    c = cache[i]
+                    for i in range(num_layers):
+                        if i not in all_superset_info:
+                            continue
 
-                    # CORRECT attention with restored cache
-                    x_normed = layer.input_layernorm(h)
-                    mask = ssm_mask if layer.is_linear else fa_mask
-                    r = layer.linear_attn(x_normed, mask, c) if layer.is_linear else layer.self_attn(x_normed, mask, c)
-                    h_mid = h + r
+                        inds_topk_i = all_pass1_data[i][3]
+                        scores_topk_i = all_pass1_data[i][4]
+                        layer = layers[i]
 
-                    # Use Pass 1's top-K routing (pre-computed, already concrete)
-                    h_post = layer.post_attention_layernorm(h_mid)
-                    inds_topk_i = all_pass1_data[i][3]
-                    scores_topk_i = all_pass1_data[i][4]
+                        inds_np = np.array(inds_topk_i.tolist())
+                        unique_experts = np.unique(inds_np)
+                        num_unique = len(unique_experts)
+                        unique_list = unique_experts.tolist()
 
-                    inds_np = np.array(inds_topk_i.tolist())
-                    unique_experts = np.unique(inds_np)
-                    num_unique = len(unique_experts)
-                    unique_list = unique_experts.tolist()
+                        # Build remap table
+                        remap = np.zeros(layer.mlp.num_experts, dtype=np.int32)
+                        remap[unique_experts] = np.arange(num_unique)
+                        remapped_inds = mx.array(remap[inds_np])
 
-                    # Build remap table
-                    remap = np.zeros(layer.mlp.num_experts, dtype=np.int32)
-                    remap[unique_experts] = np.arange(num_unique)
-                    remapped_inds = mx.array(remap[inds_np])
+                        _fwl_routing[i] = (unique_list, remap, remapped_inds, scores_topk_i)
 
-                    # Track routing
-                    _token_routing[i] = unique_list
-                    if pin_phase == "warmup":
-                        for eidx in unique_list:
-                            pin_counts[i, eidx] += 1
+                        # Track routing
+                        _token_routing[i] = unique_list
+                        if pin_phase == "warmup":
+                            for eidx in unique_list:
+                                pin_counts[i, eidx] += 1
 
-                    # Wait for THIS LAYER's expert I/O (just-in-time)
+                        # Build load_list: (layer, expert_idx, slot)
+                        for slot, eidx in enumerate(unique_list):
+                            if slot < active_experts:
+                                _fwl_load_list.append((i, eidx, slot))
+
+                    # Dispatch ALL expert reads in one C call (parallel pread into Metal buffers)
                     _t_io = time.perf_counter()
-                    all_expert_attrs = {}
-                    layer_pinned = pinned_experts.get(i, {})
-                    if pin_phase == "active" and layer_pinned:
-                        for idx in unique_list:
-                            if idx in layer_pinned:
-                                all_expert_attrs[idx] = layer_pinned[idx]
-                                pin_total_hits += 1
-                        pin_total_lookups += len(unique_list)
+                    if _fwl_load_list:
+                        import fast_weight_load
+                        fast_weight_load.load_experts_coalesced(_fwl_load_list)
+                    _se_io_total = time.perf_counter() - _t_io
 
-                    for eidx in unique_list:
-                        if eidx in all_expert_attrs:
+                    # Track I/O stats
+                    token_io_seeks += len(_fwl_load_list)
+                    token_io_bytes += len(_fwl_load_list) * es
+                    _ss_hits = len(_fwl_load_list)
+
+                    # Build computation graph using pre-filled Metal buffers
+                    _t_conv_start = time.perf_counter()
+                    for i in range(num_layers):
+                        if i not in all_superset_info:
+                            if i in all_pass1_data:
+                                layer = layers[i]
+                                c = cache[i]
+                                x_normed = layer.input_layernorm(h)
+                                mask = ssm_mask if layer.is_linear else fa_mask
+                                r = layer.linear_attn(x_normed, mask, c) if layer.is_linear else layer.self_attn(x_normed, mask, c)
+                                h = h + r
                             continue
-                        raw = all_raw_data.get((i, eidx))
-                        if raw is None:
-                            future = all_read_futures.get((i, eidx))
-                            if future is not None:
-                                raw = future.result()
-                                all_raw_data[(i, eidx)] = raw
-                                if numpy_cache is not None:
-                                    numpy_cache[(i, eidx)] = raw
-                                    while len(numpy_cache) > numpy_cache_max_entries:
-                                        numpy_cache.popitem(last=False)
-                                token_io_bytes += es
-                                token_io_seeks += 1
-                                _ss_hits += 1
-                            elif i in packed_layers:
-                                _ss_misses += 1
-                                packed_fd = packed_fds[i]
-                                raw = os.pread(packed_fd, es, eidx * es)
-                                all_raw_data[(i, eidx)] = raw
-                                _ss_fallback_bytes += es
-                                token_io_bytes += es
-                                token_io_seeks += 1
+
+                        unique_list, remap, remapped_inds, scores_topk_i = _fwl_routing[i]
+                        layer = layers[i]
+                        c = cache[i]
+
+                        # CORRECT attention with restored cache
+                        x_normed = layer.input_layernorm(h)
+                        mask = ssm_mask if layer.is_linear else fa_mask
+                        r = layer.linear_attn(x_normed, mask, c) if layer.is_linear else layer.self_attn(x_normed, mask, c)
+                        h_mid = h + r
+
+                        h_post = layer.post_attention_layernorm(h_mid)
+
+                        # Build expert_tensors from pre-allocated C extension buffers
+                        layer_bufs = _fwl_buffers[i]
+                        expert_tensors = {}
+                        for proj_name in ["gate_proj", "up_proj", "down_proj"]:
+                            for attr_name in ["weight", "scales", "biases"]:
+                                comp_name = f"{proj_name}.{attr_name}"
+                                slices = []
+                                for slot, eidx in enumerate(unique_list):
+                                    if slot < active_experts:
+                                        arr = layer_bufs[slot][comp_name]
+                                        if 'scales' in comp_name or 'biases' in comp_name:
+                                            arr = arr.view(mx.bfloat16)
+                                        slices.append(arr)
+                                if slices:
+                                    expert_tensors[comp_name] = mx.stack(slices, axis=0)
+
+                        # Compute MoE (LAZY — no eval)
+                        y = compute_moe_direct(
+                            h_post, remapped_inds, expert_tensors,
+                            group_size=qparams["group_size"],
+                            bits=qparams["bits"],
+                            mode=qparams["mode"],
+                        )
+                        y = (y * scores_topk_i[..., None]).sum(axis=-2)
+
+                        # Shared expert
+                        shared_y = layer.mlp.shared_expert(h_post)
+                        shared_y = mx.sigmoid(layer.mlp.shared_expert_gate(h_post)) * shared_y
+
+                        h = h_mid + y + shared_y
+
+                        del expert_tensors
+
+                        layer_timings.append({
+                            "layer": i,
+                            "is_linear": layer.is_linear,
+                            "attn_router_ms": pass1_ms / num_layers,
+                            "expert_ms": 0.0,
+                            "clear_ms": 0.0,
+                            "load_ms": 0.0,
+                            "compute_ms": 0.0,
+                        })
+
+                    _se_convert_total = time.perf_counter() - _t_conv_start
+                    del _fwl_routing, _fwl_load_list
+
+                else:
+                    # ---- ORIGINAL PATH: Python pread + np.frombuffer + mx.array ----
+                    for i in range(num_layers):
+                        if i not in all_superset_info:
+                            if i in all_pass1_data:
+                                layer = layers[i]
+                                c = cache[i]
+                                x_normed = layer.input_layernorm(h)
+                                mask = ssm_mask if layer.is_linear else fa_mask
+                                r = layer.linear_attn(x_normed, mask, c) if layer.is_linear else layer.self_attn(x_normed, mask, c)
+                                h = h + r
+                            continue
+
+                        superset_list, superset_set, _, k_i = all_superset_info[i]
+                        layer = layers[i]
+                        c = cache[i]
+
+                        # CORRECT attention with restored cache
+                        x_normed = layer.input_layernorm(h)
+                        mask = ssm_mask if layer.is_linear else fa_mask
+                        r = layer.linear_attn(x_normed, mask, c) if layer.is_linear else layer.self_attn(x_normed, mask, c)
+                        h_mid = h + r
+
+                        # Use Pass 1's top-K routing (pre-computed, already concrete)
+                        h_post = layer.post_attention_layernorm(h_mid)
+                        inds_topk_i = all_pass1_data[i][3]
+                        scores_topk_i = all_pass1_data[i][4]
+
+                        inds_np = np.array(inds_topk_i.tolist())
+                        unique_experts = np.unique(inds_np)
+                        num_unique = len(unique_experts)
+                        unique_list = unique_experts.tolist()
+
+                        # Build remap table
+                        remap = np.zeros(layer.mlp.num_experts, dtype=np.int32)
+                        remap[unique_experts] = np.arange(num_unique)
+                        remapped_inds = mx.array(remap[inds_np])
+
+                        # Track routing
+                        _token_routing[i] = unique_list
+                        if pin_phase == "warmup":
+                            for eidx in unique_list:
+                                pin_counts[i, eidx] += 1
+
+                        # Wait for THIS LAYER's expert I/O (just-in-time)
+                        _t_io = time.perf_counter()
+                        all_expert_attrs = {}
+                        layer_pinned = pinned_experts.get(i, {})
+                        if pin_phase == "active" and layer_pinned:
+                            for idx in unique_list:
+                                if idx in layer_pinned:
+                                    all_expert_attrs[idx] = layer_pinned[idx]
+                                    pin_total_hits += 1
+                            pin_total_lookups += len(unique_list)
+
+                        for eidx in unique_list:
+                            if eidx in all_expert_attrs:
+                                continue
+                            raw = all_raw_data.get((i, eidx))
+                            if raw is None:
+                                future = all_read_futures.get((i, eidx))
+                                if future is not None:
+                                    raw = future.result()
+                                    all_raw_data[(i, eidx)] = raw
+                                    if numpy_cache is not None:
+                                        numpy_cache[(i, eidx)] = raw
+                                        while len(numpy_cache) > numpy_cache_max_entries:
+                                            numpy_cache.popitem(last=False)
+                                    token_io_bytes += es
+                                    token_io_seeks += 1
+                                    _ss_hits += 1
+                                elif i in packed_layers:
+                                    _ss_misses += 1
+                                    packed_fd = packed_fds[i]
+                                    raw = os.pread(packed_fd, es, eidx * es)
+                                    all_raw_data[(i, eidx)] = raw
+                                    _ss_fallback_bytes += es
+                                    token_io_bytes += es
+                                    token_io_seeks += 1
+                                else:
+                                    raise RuntimeError(
+                                        f"Single-eval: layer={i} expert={eidx} not in pre-read data")
                             else:
-                                raise RuntimeError(
-                                    f"Single-eval: layer={i} expert={eidx} not in pre-read data")
-                        else:
-                            _ss_hits += 1
-                            token_io_bytes += es
-                            token_io_seeks += 1
-                    _se_io_total += time.perf_counter() - _t_io
+                                _ss_hits += 1
+                                token_io_bytes += es
+                                token_io_seeks += 1
+                        _se_io_total += time.perf_counter() - _t_io
 
-                    # Convert raw bytes to mx.arrays and stack
-                    _t_conv = time.perf_counter()
-                    for eidx in unique_list:
-                        if eidx in all_expert_attrs:
-                            continue
-                        raw = all_raw_data[(i, eidx)]
-                        mv = memoryview(raw)
-                        attrs = {}
-                        for proj, attr, off, sz, npdtype, shape, is_bf16 in _packed_comps:
-                            arr = mx.array(np.frombuffer(mv[off:off+sz], dtype=npdtype).reshape(shape))
-                            if is_bf16:
-                                arr = arr.view(mx.bfloat16)
-                            attrs[(proj, attr)] = arr
-                        all_expert_attrs[eidx] = attrs
+                        # Convert raw bytes to mx.arrays and stack
+                        _t_conv = time.perf_counter()
+                        for eidx in unique_list:
+                            if eidx in all_expert_attrs:
+                                continue
+                            raw = all_raw_data[(i, eidx)]
+                            mv = memoryview(raw)
+                            attrs = {}
+                            for proj, attr, off, sz, npdtype, shape, is_bf16 in _packed_comps:
+                                arr = mx.array(np.frombuffer(mv[off:off+sz], dtype=npdtype).reshape(shape))
+                                if is_bf16:
+                                    arr = arr.view(mx.bfloat16)
+                                attrs[(proj, attr)] = arr
+                            all_expert_attrs[eidx] = attrs
 
-                    expert_tensors = {}
-                    for proj_name in ["gate_proj", "up_proj", "down_proj"]:
-                        for attr_name in ["weight", "scales", "biases"]:
-                            slices = [all_expert_attrs[idx][(proj_name, attr_name)]
-                                      for idx in unique_list
-                                      if (proj_name, attr_name) in all_expert_attrs[idx]]
-                            if slices:
-                                expert_tensors[f"{proj_name}.{attr_name}"] = mx.stack(slices, axis=0)
-                    del all_expert_attrs
-                    _se_convert_total += time.perf_counter() - _t_conv
+                        expert_tensors = {}
+                        for proj_name in ["gate_proj", "up_proj", "down_proj"]:
+                            for attr_name in ["weight", "scales", "biases"]:
+                                slices = [all_expert_attrs[idx][(proj_name, attr_name)]
+                                          for idx in unique_list
+                                          if (proj_name, attr_name) in all_expert_attrs[idx]]
+                                if slices:
+                                    expert_tensors[f"{proj_name}.{attr_name}"] = mx.stack(slices, axis=0)
+                        del all_expert_attrs
+                        _se_convert_total += time.perf_counter() - _t_conv
 
-                    # Compute MoE (LAZY — no eval)
-                    y = compute_moe_direct(
-                        h_post, remapped_inds, expert_tensors,
-                        group_size=qparams["group_size"],
-                        bits=qparams["bits"],
-                        mode=qparams["mode"],
-                    )
-                    y = (y * scores_topk_i[..., None]).sum(axis=-2)
+                        # Compute MoE (LAZY — no eval)
+                        y = compute_moe_direct(
+                            h_post, remapped_inds, expert_tensors,
+                            group_size=qparams["group_size"],
+                            bits=qparams["bits"],
+                            mode=qparams["mode"],
+                        )
+                        y = (y * scores_topk_i[..., None]).sum(axis=-2)
 
-                    # Shared expert
-                    shared_y = layer.mlp.shared_expert(h_post)
-                    shared_y = mx.sigmoid(layer.mlp.shared_expert_gate(h_post)) * shared_y
+                        # Shared expert
+                        shared_y = layer.mlp.shared_expert(h_post)
+                        shared_y = mx.sigmoid(layer.mlp.shared_expert_gate(h_post)) * shared_y
 
-                    h = h_mid + y + shared_y
+                        h = h_mid + y + shared_y
 
-                    del expert_tensors
+                        del expert_tensors
 
-                    layer_timings.append({
-                        "layer": i,
-                        "is_linear": layer.is_linear,
-                        "attn_router_ms": pass1_ms / num_layers,
-                        "expert_ms": 0.0,
-                        "clear_ms": 0.0,
-                        "load_ms": 0.0,
-                        "compute_ms": 0.0,
-                    })
+                        layer_timings.append({
+                            "layer": i,
+                            "is_linear": layer.is_linear,
+                            "attn_router_ms": pass1_ms / num_layers,
+                            "expert_ms": 0.0,
+                            "clear_ms": 0.0,
+                            "load_ms": 0.0,
+                            "compute_ms": 0.0,
+                        })
 
                 # SINGLE eval for entire 60-layer computation
                 _se_graph_done = time.perf_counter()
@@ -2167,7 +2346,8 @@ def generate_offload_selective(model, tokenizer, prompt, max_tokens, weight_inde
                 preprocess_ms = (_se_graph_done - _se_t0) * 1000
 
                 if token_idx <= 2:
-                    print(f"    [single-eval] io_wait: {_se_io_total*1000:.1f}ms, "
+                    _se_label = "fast-load" if _fwl_active else "single-eval"
+                    print(f"    [{_se_label}] io_wait: {_se_io_total*1000:.1f}ms, "
                           f"convert: {_se_convert_total*1000:.1f}ms, "
                           f"graph+attn: {(_se_graph_done - _se_t0 - _se_io_total - _se_convert_total)*1000:.1f}ms, "
                           f"mx.eval: {(_se_eval_done - _se_graph_done)*1000:.1f}ms, "
@@ -3692,7 +3872,7 @@ def generate_offload_selective(model, tokenizer, prompt, max_tokens, weight_inde
         if _two_pass_handled:
             # Two-pass progress display (with superset hit rate)
             _ss_str = f"ss={_ss_hit_rate:.0%}" if _ss_total > 0 else "ss=n/a"
-            _mode_label = "single-eval" if single_eval else "two-pass"
+            _mode_label = ("fast-load" if _fwl_active else "single-eval") if single_eval else "two-pass"
             if token_idx == 0:
                 ttft_ms = token_time * 1000
                 print(f"  [{fmt_time(t_token_end - t_start)}] Token 1/{max_tokens}: "
@@ -5244,6 +5424,12 @@ def main():
                              "Eliminates ~14ms of eval overhead (62%% of MoE compute time). "
                              "Quality trade-off: uses approximate routing from Pass 1 instead of "
                              "correct routing with corrected h. Requires --two-pass.")
+    parser.add_argument("--fast-load", action="store_true", default=False,
+                        help="Use fast_weight_load C extension for expert I/O in single-eval mode. "
+                             "Pre-allocates Metal buffers at startup and fills them via parallel "
+                             "pread() directly into GPU memory (no np.frombuffer + mx.array overhead). "
+                             "Reduces I/O+convert from ~191ms to ~39ms. "
+                             "Requires --single-eval --two-pass and compiled fast_weight_load.so.")
     args = parser.parse_args()
 
     # Validate --cache-gb range
@@ -5283,6 +5469,11 @@ def main():
     if args.single_eval and not args.two_pass:
         print(f"WARNING: --single-eval requires --two-pass. Ignoring.")
         args.single_eval = False
+
+    # Validate --fast-load requires --single-eval (which implies --two-pass)
+    if args.fast_load and not args.single_eval:
+        print(f"WARNING: --fast-load requires --single-eval --two-pass. Ignoring.")
+        args.fast_load = False
 
     if args.pin_experts > 0 and args.pin_experts >= args.tokens:
         print(f"WARNING: --pin-experts ({args.pin_experts}) >= --tokens ({args.tokens}). "
@@ -5494,7 +5685,8 @@ def main():
                                             batch_layers=args.batch_layers,
                                             numpy_cache_gb=args.numpy_cache_gb,
                                             two_pass=args.two_pass,
-                                            single_eval=args.single_eval)
+                                            single_eval=args.single_eval,
+                                            fast_load=args.fast_load)
     elif args.mode in ("offload", "offload_lazy"):
         # Offload mode: explicit per-layer load -> compute -> clear cycle.
         # Only way to run models larger than DRAM without OS thrashing.
