@@ -61,13 +61,17 @@ static int conv_append_tokens(ConversationState *conv, const uint32_t *toks, int
 // Returns token count written to out[], or -1 on error.
 // ============================================================================
 
-static int encode_user_message(const char *text, uint32_t *out, int max_out) {
+static int encode_user_message(const char *text, uint32_t *out, int max_out, int is_first_turn) {
     // Write the text to a temp file to avoid shell escaping issues
     const char *text_path = "/tmp/chat_input_text.txt";
     const char *tok_path = "/tmp/chat_input_tokens.bin";
 
     FILE *tf = fopen(text_path, "w");
     if (!tf) return -1;
+    // System prompt on first turn enables thinking mode
+    if (is_first_turn) {
+        fprintf(tf, "<|im_start|>system\nYou are a helpful assistant. /think<|im_end|>\n");
+    }
     fprintf(tf, "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", text);
     fclose(tf);
 
@@ -361,7 +365,8 @@ int main(int argc, char **argv) {
 
             // ---- Encode user message to tokens ----
             uint32_t msg_tokens[MAX_CONV_TOKENS];
-            int n_msg = encode_user_message(input_line, msg_tokens, MAX_CONV_TOKENS - conv.count);
+            int is_first = (conv.count == 0);
+            int n_msg = encode_user_message(input_line, msg_tokens, MAX_CONV_TOKENS - conv.count, is_first);
             if (n_msg < 0) {
                 fprintf(stderr, "[error] Failed to tokenize input. Is encode_prompt.py available?\n\n");
                 continue;
