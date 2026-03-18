@@ -171,6 +171,25 @@ static int g_use_2bit = 0;       // enabled by --2bit flag: use packed_experts_2
 static int g_cache_telemetry_enabled = 0;  // enabled by --cache-telemetry flag
 static int g_think_budget = 2048; // max thinking tokens before force-emitting </think>
 
+// Tiered I/O: cold fds (F_NOCACHE) for first reads, warm fds (page cached) for repeats
+static int *g_layer_fds_cold = NULL;    // [NUM_LAYERS] cold fds (set in main)
+static uint8_t g_expert_seen[NUM_LAYERS][NUM_EXPERTS / 8];  // bitset: seen before?
+
+static inline int expert_is_seen(int layer, int expert) {
+    return (g_expert_seen[layer][expert >> 3] >> (expert & 7)) & 1;
+}
+static inline void expert_mark_seen(int layer, int expert) {
+    g_expert_seen[layer][expert >> 3] |= (1 << (expert & 7));
+}
+// Pick the right fd: warm (page cached) for seen experts, cold (F_NOCACHE) for new ones
+static inline int expert_pick_fd(int layer, int expert, int warm_fd) {
+    if (g_layer_fds_cold && !expert_is_seen(layer, expert)) {
+        expert_mark_seen(layer, expert);
+        return g_layer_fds_cold[layer];  // first time: bypass page cache
+    }
+    return warm_fd;  // seen before: use page cache
+}
+
 // Active expert size based on quantization mode
 static inline size_t active_expert_size(void) {
     return g_use_2bit ? EXPERT_SIZE_2BIT : EXPERT_SIZE;
@@ -4944,8 +4963,8 @@ static void fused_layer_forward(
                 for (int m = 0; m < num_misses; m++) {
                     int k = miss_indices[m];
                     int cidx = miss_cache_idx[m];
-                    tasks[m].fd = packed_fd;
-                    tasks[m].dst = g_malloc_cache->data[cidx];  // pread into cache backing memory
+                    tasks[m].fd = expert_pick_fd(layer_idx, expert_indices[k], packed_fd);
+                    tasks[m].dst = g_malloc_cache->data[cidx];
                     tasks[m].offset = (off_t)expert_indices[k] * esz;
                     tasks[m].size = esz;
                     tasks[m].result = 0;
@@ -4999,7 +5018,7 @@ static void fused_layer_forward(
                 InferPreadTask tasks[MAX_K];
                 for (int m = 0; m < num_misses; m++) {
                     int k = miss_indices[m];
-                    tasks[m].fd = packed_fd;
+                    tasks[m].fd = expert_pick_fd(layer_idx, expert_indices[k], packed_fd);
                     tasks[m].dst = [miss_bufs[m] contents];
                     tasks[m].offset = (off_t)expert_indices[k] * esz;
                     tasks[m].size = esz;
@@ -6187,16 +6206,30 @@ int main(int argc, char **argv) {
         }
 
         // ---- Open + mmap packed expert files ----
+        // Tiered I/O: two fds per layer file.
+        //   layer_fds[i]      = warm fd (page cached) — for experts seen before
+        //   layer_fds_cold[i] = cold fd (F_NOCACHE)   — for first-time expert reads
+        // Seen-expert bitset tracks which (layer, expert) pairs have been read before.
+        // First read goes through cold fd (no page cache pollution).
+        // Subsequent reads go through warm fd (page cache hit = 32 GB/s vs 5.5 GB/s).
         int layer_fds[NUM_LAYERS];
+        int layer_fds_cold[NUM_LAYERS];
         void *layer_mmaps[NUM_LAYERS];
         size_t layer_mmap_sizes[NUM_LAYERS];
         int expert_layers_available = 0;
+
+        // Reset the global seen-expert bitset
+        memset(g_expert_seen, 0, sizeof(g_expert_seen));
+
         for (int i = 0; i < NUM_LAYERS; i++) {
             char path[1024];
             snprintf(path, sizeof(path), "%s/%s/layer_%02d.bin", model_path,
                      g_use_2bit ? "packed_experts_2bit" : "packed_experts", i);
+            // Warm fd: normal (page cached)
             layer_fds[i] = open(path, O_RDONLY);
-            if (layer_fds[i] >= 0 && g_use_2bit) fcntl(layer_fds[i], F_NOCACHE, 1);
+            // Cold fd: F_NOCACHE (bypass page cache for first-time reads)
+            layer_fds_cold[i] = open(path, O_RDONLY);
+            if (layer_fds_cold[i] >= 0) fcntl(layer_fds_cold[i], F_NOCACHE, 1);
             layer_mmaps[i] = MAP_FAILED;
             layer_mmap_sizes[i] = 0;
             if (layer_fds[i] >= 0) {
@@ -6212,6 +6245,10 @@ int main(int argc, char **argv) {
             }
         }
         printf("[experts] %d/%d packed layer files available (mmap'd)\n", expert_layers_available, NUM_LAYERS);
+
+        // Wire up tiered I/O globals
+        g_layer_fds_cold = layer_fds_cold;
+        printf("[tiered-io] Cold fds (F_NOCACHE) + warm fds (page cached) active\n");
 
         // Warm page cache hint
         if (expert_layers_available > 0) {
@@ -6470,6 +6507,7 @@ int main(int argc, char **argv) {
             if (layer_states[i]) linear_attn_state_free(layer_states[i]);
             if (layer_mmaps[i] != MAP_FAILED) munmap(layer_mmaps[i], layer_mmap_sizes[i]);
             if (layer_fds[i] >= 0) close(layer_fds[i]);
+            if (layer_fds_cold[i] >= 0) close(layer_fds_cold[i]);
         }
         free(layer_states);
         free(kv_caches);
