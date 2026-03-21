@@ -1136,43 +1136,31 @@ kernel void rms_norm_qk(
     uint tid [[thread_position_in_threadgroup]]
 ) {
     uint base = head * key_dim;
+    uint simd_lane = tid % 32;
+    uint simd_group = tid / 32;
 
-    // RMS norm for q
-    threadgroup float q_sum_sq;
-    if (tid == 0) q_sum_sq = 0;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
+    // RMS norm for q — SIMD-accelerated reduction
     float qval = (tid < key_dim) ? q[base + tid] : 0;
-    // Use threadgroup atomic add for sum of squares
-    float q_sq_local = qval * qval;
-    // Simple reduction: thread 0 accumulates (key_dim=128, fits in one pass)
-    threadgroup float q_partial[128];
-    q_partial[tid] = q_sq_local;
+    float q_sq = qval * qval;
+    float q_simd = simd_sum(q_sq);
+    threadgroup float q_shared[4];  // 128 threads = 4 SIMD groups
+    if (simd_lane == 0) q_shared[simd_group] = q_simd;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid == 0) {
-        float s = 0;
-        for (uint i = 0; i < key_dim; i++) s += q_partial[i];
-        q_sum_sq = s;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float q_inv_rms = rsqrt(q_sum_sq / float(key_dim) + 1e-6f);
+    float q_total = q_shared[0] + q_shared[1] + q_shared[2] + q_shared[3];
+    float q_inv_rms = rsqrt(q_total / float(key_dim) + 1e-6f);
     if (tid < key_dim) {
-        q[base + tid] = qval * q_inv_rms * inv_scale * inv_scale;  // q gets extra scale
+        q[base + tid] = qval * q_inv_rms * inv_scale * inv_scale;
     }
 
-    // RMS norm for k
-    threadgroup float k_sum_sq;
+    // RMS norm for k — SIMD-accelerated reduction
     float kval = (tid < key_dim) ? k[base + tid] : 0;
-    threadgroup float k_partial[128];
-    k_partial[tid] = kval * kval;
+    float k_sq = kval * kval;
+    float k_simd = simd_sum(k_sq);
+    threadgroup float k_shared[4];
+    if (simd_lane == 0) k_shared[simd_group] = k_simd;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid == 0) {
-        float s = 0;
-        for (uint i = 0; i < key_dim; i++) s += k_partial[i];
-        k_sum_sq = s;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float k_inv_rms = rsqrt(k_sum_sq / float(key_dim) + 1e-6f);
+    float k_total = k_shared[0] + k_shared[1] + k_shared[2] + k_shared[3];
+    float k_inv_rms = rsqrt(k_total / float(key_dim) + 1e-6f);
     if (tid < key_dim) {
         k[base + tid] = kval * k_inv_rms * inv_scale;
     }
@@ -1223,18 +1211,17 @@ kernel void gated_rms_norm(
     uint base = head * value_dim;
 
     float val = (tid < value_dim) ? values[base + tid] : 0;
+    uint simd_lane = tid % 32;
+    uint simd_group = tid / 32;
 
-    // RMS norm reduction
-    threadgroup float partial[128];
-    partial[tid] = val * val;
+    // RMS norm reduction — SIMD-accelerated
+    float sq = val * val;
+    float simd_s = simd_sum(sq);
+    threadgroup float partial[4];  // 128 threads = 4 SIMD groups
+    if (simd_lane == 0) partial[simd_group] = simd_s;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid == 0) {
-        float s = 0;
-        for (uint i = 0; i < value_dim; i++) s += partial[i];
-        partial[0] = s;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float inv_rms = rsqrt(partial[0] / float(value_dim) + eps);
+    float total = partial[0] + partial[1] + partial[2] + partial[3];
+    float inv_rms = rsqrt(total / float(value_dim) + eps);
 
     if (tid < value_dim) {
         float normed = val * inv_rms;
