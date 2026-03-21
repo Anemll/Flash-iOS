@@ -445,9 +445,9 @@ kernel void dequant_matvec_2bit(
     uint packed_cols = in_dim / 16;  // 16 values per uint32 for 2-bit
     uint num_groups  = in_dim / group_size;
 
-    threadgroup float x_shared[4096];
+    threadgroup half x_shared[4096];
     for (uint i = lid; i < in_dim; i += 256) {
-        x_shared[i] = x[i];
+        x_shared[i] = half(x[i]);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (row >= out_dim) return;
@@ -459,9 +459,8 @@ kernel void dequant_matvec_2bit(
     float acc = 0.0f;
 
     // Each lane processes strided columns (16 values per uint32)
-    // FMA optimization: (nibble * scale + bias) * x = fma(nibble, scale*x, bias*x)
+    // FMA optimization with half-precision x_shared
     for (uint col = simd_lane; col < packed_cols; col += 32) {
-        // group_size/16 packed words per group
         uint g = col / (group_size / 16);
         float scale = bf16_to_f32(s_row[g]);
         float bias  = bf16_to_f32(b_row[g]);
@@ -469,23 +468,31 @@ kernel void dequant_matvec_2bit(
         uint32_t packed = w_row[col];
         uint x_base = col * 16;
 
-        // Pre-compute scale*x and bias*x for FMA
-        float sx0  = scale * x_shared[x_base +  0];  float bx0  = bias * x_shared[x_base +  0];
-        float sx1  = scale * x_shared[x_base +  1];  float bx1  = bias * x_shared[x_base +  1];
-        float sx2  = scale * x_shared[x_base +  2];  float bx2  = bias * x_shared[x_base +  2];
-        float sx3  = scale * x_shared[x_base +  3];  float bx3  = bias * x_shared[x_base +  3];
-        float sx4  = scale * x_shared[x_base +  4];  float bx4  = bias * x_shared[x_base +  4];
-        float sx5  = scale * x_shared[x_base +  5];  float bx5  = bias * x_shared[x_base +  5];
-        float sx6  = scale * x_shared[x_base +  6];  float bx6  = bias * x_shared[x_base +  6];
-        float sx7  = scale * x_shared[x_base +  7];  float bx7  = bias * x_shared[x_base +  7];
-        float sx8  = scale * x_shared[x_base +  8];  float bx8  = bias * x_shared[x_base +  8];
-        float sx9  = scale * x_shared[x_base +  9];  float bx9  = bias * x_shared[x_base +  9];
-        float sx10 = scale * x_shared[x_base + 10];  float bx10 = bias * x_shared[x_base + 10];
-        float sx11 = scale * x_shared[x_base + 11];  float bx11 = bias * x_shared[x_base + 11];
-        float sx12 = scale * x_shared[x_base + 12];  float bx12 = bias * x_shared[x_base + 12];
-        float sx13 = scale * x_shared[x_base + 13];  float bx13 = bias * x_shared[x_base + 13];
-        float sx14 = scale * x_shared[x_base + 14];  float bx14 = bias * x_shared[x_base + 14];
-        float sx15 = scale * x_shared[x_base + 15];  float bx15 = bias * x_shared[x_base + 15];
+        // Load x values from half shared mem and pre-compute scale*x, bias*x for FMA
+        float xv0  = float(x_shared[x_base +  0]), xv1  = float(x_shared[x_base +  1]);
+        float xv2  = float(x_shared[x_base +  2]), xv3  = float(x_shared[x_base +  3]);
+        float xv4  = float(x_shared[x_base +  4]), xv5  = float(x_shared[x_base +  5]);
+        float xv6  = float(x_shared[x_base +  6]), xv7  = float(x_shared[x_base +  7]);
+        float xv8  = float(x_shared[x_base +  8]), xv9  = float(x_shared[x_base +  9]);
+        float xv10 = float(x_shared[x_base + 10]), xv11 = float(x_shared[x_base + 11]);
+        float xv12 = float(x_shared[x_base + 12]), xv13 = float(x_shared[x_base + 13]);
+        float xv14 = float(x_shared[x_base + 14]), xv15 = float(x_shared[x_base + 15]);
+        float sx0  = scale * xv0;   float bx0  = bias * xv0;
+        float sx1  = scale * xv1;   float bx1  = bias * xv1;
+        float sx2  = scale * xv2;   float bx2  = bias * xv2;
+        float sx3  = scale * xv3;   float bx3  = bias * xv3;
+        float sx4  = scale * xv4;   float bx4  = bias * xv4;
+        float sx5  = scale * xv5;   float bx5  = bias * xv5;
+        float sx6  = scale * xv6;   float bx6  = bias * xv6;
+        float sx7  = scale * xv7;   float bx7  = bias * xv7;
+        float sx8  = scale * xv8;   float bx8  = bias * xv8;
+        float sx9  = scale * xv9;   float bx9  = bias * xv9;
+        float sx10 = scale * xv10;  float bx10 = bias * xv10;
+        float sx11 = scale * xv11;  float bx11 = bias * xv11;
+        float sx12 = scale * xv12;  float bx12 = bias * xv12;
+        float sx13 = scale * xv13;  float bx13 = bias * xv13;
+        float sx14 = scale * xv14;  float bx14 = bias * xv14;
+        float sx15 = scale * xv15;  float bx15 = bias * xv15;
 
         acc += fma(float((packed >>  0) & 0x3), sx0,  bx0);
         acc += fma(float((packed >>  2) & 0x3), sx1,  bx1);
