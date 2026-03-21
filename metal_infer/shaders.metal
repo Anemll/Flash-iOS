@@ -271,14 +271,12 @@ kernel void dequant_matvec_4bit_v3(
     // ---- Cache input vector in threadgroup shared memory ----
     // Max in_dim = 4096, so we need 4096 floats = 16KB shared memory
     // This is well within the 32KB threadgroup memory limit on M3
-    threadgroup float x_shared[4096];
+    threadgroup half x_shared[4096];
 
-    // Cooperative load: 256 threads load 4096 floats (16 per thread)
-    // ALL threads must participate in this load + barrier, even if their
-    // row is out of bounds. Early return before the barrier causes only
-    // partial loading of x_shared, corrupting results for valid rows.
+    // Cooperative load: 256 threads load 4096 values (16 per thread)
+    // Store as half to halve shared memory (8KB vs 16KB) for better occupancy
     for (uint i = lid; i < in_dim; i += 256) {
-        x_shared[i] = x[i];
+        x_shared[i] = half(x[i]);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -311,14 +309,18 @@ kernel void dequant_matvec_4bit_v3(
         // Rearranged: (nibble * scale + bias) * x = nibble * (scale*x) + bias*x
         // Pre-compute scale*x and bias*x, then use FMA for dequant+multiply in one op.
         // This reduces per-nibble from (convert + mul + add + mul + add) to (convert + FMA + add).
-        float sx0 = scale * x_shared[x_base + 0];  float bx0 = bias * x_shared[x_base + 0];
-        float sx1 = scale * x_shared[x_base + 1];  float bx1 = bias * x_shared[x_base + 1];
-        float sx2 = scale * x_shared[x_base + 2];  float bx2 = bias * x_shared[x_base + 2];
-        float sx3 = scale * x_shared[x_base + 3];  float bx3 = bias * x_shared[x_base + 3];
-        float sx4 = scale * x_shared[x_base + 4];  float bx4 = bias * x_shared[x_base + 4];
-        float sx5 = scale * x_shared[x_base + 5];  float bx5 = bias * x_shared[x_base + 5];
-        float sx6 = scale * x_shared[x_base + 6];  float bx6 = bias * x_shared[x_base + 6];
-        float sx7 = scale * x_shared[x_base + 7];  float bx7 = bias * x_shared[x_base + 7];
+        float x0 = float(x_shared[x_base + 0]), x1 = float(x_shared[x_base + 1]);
+        float x2 = float(x_shared[x_base + 2]), x3 = float(x_shared[x_base + 3]);
+        float x4 = float(x_shared[x_base + 4]), x5 = float(x_shared[x_base + 5]);
+        float x6 = float(x_shared[x_base + 6]), x7 = float(x_shared[x_base + 7]);
+        float sx0 = scale * x0;  float bx0 = bias * x0;
+        float sx1 = scale * x1;  float bx1 = bias * x1;
+        float sx2 = scale * x2;  float bx2 = bias * x2;
+        float sx3 = scale * x3;  float bx3 = bias * x3;
+        float sx4 = scale * x4;  float bx4 = bias * x4;
+        float sx5 = scale * x5;  float bx5 = bias * x5;
+        float sx6 = scale * x6;  float bx6 = bias * x6;
+        float sx7 = scale * x7;  float bx7 = bias * x7;
 
         acc += fma(float((packed >>  0) & 0xF), sx0, bx0);
         acc += fma(float((packed >>  4) & 0xF), sx1, bx1);
