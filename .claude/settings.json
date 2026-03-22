@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs ls:*)",
+      "Bash(xcrun devicectl:*)",
+      "Read(//Users/anemll/Models/flash/qwen3.5-35b-a3b-tiered/**)",
+      "Bash(DEVICE=\"00008150-0016405C01F0401C\" BUNDLE=\"flashmoe.anemll.com\" SRC=\"/Users/anemll/Models/flash/qwen3.5-35b-a3b-tiered\" DST=\"Documents/qwen3.5-35b-a3b-tiered\" __NEW_LINE_c691a4522ac44477__ echo \"Copying model_weights.bin \\(1.3GB\\)...\" xcrun devicectl device copy to --device \"$DEVICE\" --domain-type appDataContainer --domain-identifier \"$BUNDLE\" --source \"$SRC/model_weights.bin\" --destination \"$DST/model_weights.bin\")",
+      "Bash(chmod +x /Users/anemll/SourceRelease/GITHUB/ML_playground/FlashMoE-iOS/copy_model_to_iphone.sh)",
+      "Read(//Users/anemll/SourceRelease/GITHUB/ML_playground/FlashMoE-iOS/{for\\(i=1;i<=NF;i++\\) if\\($i ~ /^[0-9A-F]{8}-/**)",
+      "Read(//Users/anemll/Library/Containers/com.flashmoe.ios/Data/Documents/qwen3.5-35b-a3b-q4/packed_experts/**)",
+      "Bash(gh repo:*)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  }
+}

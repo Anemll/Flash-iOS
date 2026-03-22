@@ -395,8 +395,8 @@
 				CLANG_ENABLE_OBJC_ARC = YES;
 				CODE_SIGN_ENTITLEMENTS = Resources/FlashMoE.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
-				DEVELOPMENT_TEAM = ARRY5366Y3;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				DEVELOPMENT_TEAM = YMCRS53QKE;
 				GCC_OPTIMIZATION_LEVEL = 2;
 				GCC_WARN_INHIBIT_ALL_WARNINGS = NO;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -421,7 +421,6 @@
 				);
 				OTHER_LDFLAGS = "-lcompression";
 				PRODUCT_BUNDLE_IDENTIFIER = com.flashmoe.ios;
-				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = flashmoe.anemll.com;
 				PRODUCT_NAME = FlashMoE;
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
@@ -440,8 +439,8 @@
 				CLANG_ENABLE_OBJC_ARC = YES;
 				CODE_SIGN_ENTITLEMENTS = Resources/FlashMoE.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
-				DEVELOPMENT_TEAM = ARRY5366Y3;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				DEVELOPMENT_TEAM = YMCRS53QKE;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
@@ -469,7 +468,6 @@
 				);
 				OTHER_LDFLAGS = "-lcompression";
 				PRODUCT_BUNDLE_IDENTIFIER = com.flashmoe.ios;
-				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = flashmoe.anemll.com;
 				PRODUCT_NAME = FlashMoE;
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
