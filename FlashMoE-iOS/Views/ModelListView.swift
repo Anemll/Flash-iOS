@@ -30,6 +30,7 @@ struct ModelListView: View {
     @State private var isScanning = true
     @State private var loadError: String?
     @State private var selectedModel: LocalModel?
+    @State private var modelToDelete: LocalModel? = nil
     private let downloadManager = DownloadManager.shared
 
     var body: some View {
@@ -63,6 +64,13 @@ struct ModelListView: View {
                     ForEach(localModels) { model in
                         ModelRow(model: model, isLoading: engine.state == .loading && selectedModel?.id == model.id)
                             .onTapGesture { loadModel(model) }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button(role: .destructive) {
+                                    modelToDelete = model
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
                     }
                 }
             }
@@ -104,6 +112,26 @@ struct ModelListView: View {
             if newStatus == .complete {
                 scanForModels()
             }
+        }
+        .alert("Delete Model", isPresented: Binding(
+            get: { modelToDelete != nil },
+            set: { if !$0 { modelToDelete = nil } }
+        )) {
+            Button("Delete", role: .destructive) {
+                if let model = modelToDelete {
+                    do {
+                        try FileManager.default.removeItem(atPath: model.path)
+                        print("[delete] Removed \(model.name)")
+                        scanForModels()
+                    } catch {
+                        print("ERROR: Failed to delete: \(error)")
+                    }
+                }
+                modelToDelete = nil
+            }
+            Button("Cancel", role: .cancel) { modelToDelete = nil }
+        } message: {
+            Text("Delete \"\(modelToDelete?.name ?? "")\" (\(String(format: "%.1f GB", modelToDelete?.sizeGB ?? 0)))? This cannot be undone.")
         }
     }
 
