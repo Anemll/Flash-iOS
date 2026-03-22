@@ -25,15 +25,23 @@ The engine auto-detects architecture, dimensions, expert counts, quantization, a
 
 ![Progress](progress.png)
 
-Results below are for Qwen3.5-397B-A17B on MacBook Pro M3 Max (48GB):
+### MacBook Pro M3 Max (48GB)
 
 | Configuration | tok/s | Quality | Notes |
 |--------------|-------|---------|-------|
-| 4-bit experts, FMA kernel | **4.36** | Excellent | Current best. Full tool calling. 209GB on disk. |
-| 4-bit experts, baseline | 3.90 | Excellent | Before FMA kernel optimization. |
+| 4-bit + autoresearch optimizations | **9.7** | Excellent | +34.7% from half-precision x_shared + SIMD + FMA |
+| 4-bit experts, FMA kernel | **4.36** | Excellent | Before autoresearch. Full tool calling. 209GB on disk. |
 | **Tiered (hot=4bit, cold=2bit)** | **4.36+** | **Excellent** | **33% smaller on disk. Auto-detected.** |
 | 2-bit experts, trust OS | 5.74 | Good* | 120GB on disk. *Breaks JSON/tool calling. |
-| 2-bit peak single token | 7.05 | Good* | Warm cache burst. *Not suitable for tool use. |
+
+### iPhone 17 (12GB, A19)
+
+| Model | K | tok/s | Notes |
+|-------|---|-------|-------|
+| Qwen3.5-35B-A3B (4-bit) | 8 | **5.5** | 19.5GB download. Full quality. Full GPU path. |
+| Qwen3.5-35B-A3B (tiered) | 8 | **5.5+** | 13.4GB download. Same quality. |
+| Qwen3.5-397B-A17B (4-bit) | 4 | ~0.003* | *CPU fallback only — Metal 4GB per-buffer limit blocks GPU path. |
+| Qwen3.5-397B-A17B (4-bit) | 4 | ~1-2** | **Projected with split weight files enabling GPU path. |
 
 *2-bit quantization produces `\name\` instead of `"name"` in JSON output, making tool calling unreliable. 4-bit is the production configuration.
 
@@ -41,11 +49,18 @@ Results below are for Qwen3.5-397B-A17B on MacBook Pro M3 Max (48GB):
 
 ## Hardware
 
+### Development (MacBook Pro)
 - **Machine**: MacBook Pro, Apple M3 Max
 - **Chip**: 16-core CPU (12P + 4E), 40-core GPU, 16-core ANE
 - **Memory**: 48 GB unified (~400 GB/s bandwidth)
 - **SSD**: 1TB Apple Fabric, **17.5 GB/s sequential read** (measured)
 - **macOS**: 26.2 (Darwin 25.2.0)
+
+### Mobile (iPhone 17)
+- **Chip**: A19, ~10-core GPU
+- **Memory**: 12 GB unified
+- **SSD**: ~2.5-3 GB/s NVMe
+- **iOS**: 18+
 
 ## Architecture
 
@@ -72,6 +87,23 @@ Qwen3.5 MoE models use a hybrid attention architecture with GatedDeltaNet (linea
 5. **Accelerate BLAS for Linear Attention** — The GatedDeltaNet recurrence uses `cblas_sscal`, `cblas_sgemv`, and `cblas_sger` for the 64-head × 128×128 state matrix update. 64% faster than scalar code.
 
 6. **Trust the OS** — No custom expert cache. The OS page cache (~35GB) manages expert data caching via standard LRU. Every custom caching approach we tested (Metal LRU, malloc cache, LZ4 compressed cache) was slower due to GPU memory pressure or overhead. The page cache achieves ~71% hit rate naturally.
+
+7. **K-Reduction for Mobile** — MoE models have a natural inference knob: activate fewer experts per token than trained. K=4 instead of K=10 on the 397B model cuts I/O by 60% per token with graceful quality degradation. The router still picks the *best* K experts from all 512 — it's not random subsampling. This makes the 397B viable on iPhone (12GB RAM, 2.5 GB/s NVMe) at ~1-2 tok/s.
+
+8. **Half-Precision Shared Memory** — Storing the threadgroup input cache as `half` instead of `float` in Metal dequant kernels halves shared memory usage (16KB → 8KB), doubling GPU occupancy. Since inputs are already approximate from 4-bit dequantization, the precision loss is negligible. +12% tok/s on the main kernel.
+
+9. **iOS Unity Build** — The entire 7,500-line inference engine compiles into the iOS app via `#include "infer.m"`. No fork, no separate codebase. A thin C API (`FlashMoEEngine.h`) wraps the static globals, and a Swift `@Observable` bridge provides `AsyncStream<Token>` generation with automatic memory-adaptive context sizing.
+
+### iOS-Specific Constraints
+
+- **Metal 4GB per-buffer limit** — iOS Metal buffers cannot exceed 4096 MB, regardless of entitlements. The 35B model (2.5GB weights) fits in a single buffer. The 397B model (5.5GB weights) does not. Attempted workarounds: two overlapping buffers (OOM), staging buffer with memcpy per dispatch (data corruption from in-flight command buffer aliasing), CPU fallback (works, 6 min/token). Solution: split `model_weights.bin` into two <4GB files at packing time.
+- **K-reduction quality varies by model** — K=2 and K=4 on the 397B produce gibberish/degenerate output. The model was trained with K=10 and needs K=6+ for coherence (untested — needs GPU path). The 35B at default K=8 works perfectly.
+- **Debug build overhead** — Metal API Validation adds ~2GB of `MTLDebugComputeCommandEncoder` proxies, causing OOM on iPhone. Must build Release for on-device testing.
+- **Bundle ID migration** — Switching from personal to paid developer team requires a new bundle ID (Apple takes 24-48h to release old ones). Moving 300GB of model data between app containers requires `UIDocumentPickerViewController` with `.moveToService`.
+- **File Provider Storage penalty** — Models accessed via Files app integration go through the file coordination layer, adding I/O latency to every `pread`. Always import models to the app's own Documents directory.
+- **`isExcludedFromBackup`** — Must be set on all model files to prevent iOS from purging 200GB+ of data during storage pressure events.
+
+See [FlashMoE-iOS/IOS_PORT.md](FlashMoE-iOS/IOS_PORT.md) for the full iOS porting story and [FlashMoE-iOS/397B_ANALYSIS.md](FlashMoE-iOS/397B_ANALYSIS.md) for the 397B memory/performance analysis.
 
 ### Pipeline Per Layer (4.28ms average at 4-bit)
 
@@ -112,15 +144,24 @@ python model_manager.py --check /path/to/model
 After downloading, prepare the model for inference:
 
 ```bash
-# 1. Pack expert weights into per-expert files
-python repack_experts.py --model ~/.cache/huggingface/hub/models--mlx-community--Qwen3.5-35B-A3B-4bit
+MODEL=~/.cache/huggingface/hub/models--mlx-community--Qwen3.5-35B-A3B-4bit
 
-# 2. Extract non-expert weights into a single binary
-python metal_infer/extract_weights.py --model ~/.cache/huggingface/hub/models--mlx-community--Qwen3.5-35B-A3B-4bit
+# 1. Build expert index (maps tensor names to byte offsets)
+python build_expert_index.py --model $MODEL
 
-# 3. Run inference
-cd metal_infer && ./infer --model ~/.cache/huggingface/hub/models--mlx-community--Qwen3.5-35B-A3B-4bit --prompt "Hello" --tokens 20
+# 2. Pack expert weights into per-layer binary files
+python repack_experts.py --index expert_index.json
+
+# 3. Extract non-expert weights into a single mmap-friendly binary
+python metal_infer/extract_weights.py --model $MODEL
+
+# 4. Run inference (auto-detects weights in model directory)
+cd metal_infer && ./infer --model $MODEL --prompt "Hello" --tokens 20
 ```
+
+Pre-packed models are available on HuggingFace (no repacking needed):
+- `alexintosh/Qwen3.5-35B-A3B-Q4-FlashMoE` (19.5 GB, 4-bit)
+- `alexintosh/Qwen3.5-35B-A3B-Q4-Tiered-FlashMoE` (13.4 GB, tiered)
 
 ### Tiered Expert Quantization (Optional)
 
@@ -173,7 +214,8 @@ export FLASH_MOE_MODEL=~/.cache/huggingface/hub/models--mlx-community--Qwen3.5-3
 
 ```
 model_manager.py       # Model discovery, download, and compatibility checking
-repack_experts.py      # 4-bit expert packing from safetensors
+build_expert_index.py  # Build expert_index.json from safetensors (step 1 of packing)
+repack_experts.py      # 4-bit expert packing from safetensors (step 2)
 profile_experts.py     # Expert frequency profiling → hot_experts.json
 repack_experts_tiered.py  # Tiered repacking (hot=4-bit, cold=2-bit)
 progress.py            # Results visualization (Q2/Q4 tracks)
@@ -196,11 +238,47 @@ metal_infer/
   model_weights.json   # Tensor manifest
   vocab.bin            # Vocabulary for token decoding
   tokenizer.bin        # Pre-exported BPE tokenizer data
+
+FlashMoE-iOS/              # Native iOS app
+  FlashMoEEngine/
+    FlashMoEEngine.h       # C API (create/load/generate/cancel/reset/destroy)
+    FlashMoEEngine.m       # Unity build wrapping infer.m for iOS
+  Bridge/
+    FlashMoEBridge.swift   # @Observable async Swift wrapper
+  Views/
+    ChatView.swift         # Streaming chat UI with thinking disclosure
+    ModelListView.swift    # Model discovery + download catalog
+    ModelDownloadRow.swift # Download progress with pause/resume
+    ProfilerView.swift     # Resource monitoring overlay
+  Services/
+    DownloadManager.swift  # Background URLSession model downloads
+  Models/
+    ModelCatalog.swift     # HuggingFace model registry with K recommendations
+  App/
+    FlashMoEApp.swift      # SwiftUI app entry point
+  IOS_PORT.md              # Full iOS porting documentation
+  397B_ANALYSIS.md         # 397B on iPhone: memory, Metal limits, K-reduction quality
+  project.yml              # XcodeGen config (iOS 18+, iPhone only)
+  copy_model_to_iphone.sh  # Push models to device over USB (pymobiledevice3)
+
+autoresearch/              # Automated experiment loop
+  program.md               # Agent instructions for autonomous optimization
+  benchmark.sh             # Measurement harness with quality gates
+  prepare.sh               # Baseline setup
+  experiments.tsv          # Experiment log
 ```
 
 ## What We Tried (and What Worked)
 
-### Kept
+### Autoresearch Wins (Automated Experiment Loop)
+| Approach | Result | Impact |
+|----------|--------|--------|
+| Half-precision x_shared (v3 kernel) | Halve shared mem → 2× occupancy | **+12.1% tok/s** |
+| FMA 2-bit dequant kernel | fma(nibble, scale*x, bias*x) | **+6.2% tok/s** |
+| Half-precision x_shared (2-bit kernel) | Same occupancy trick | **+3.3% tok/s** |
+| SIMD reduction in rms_norm_qk | simd_sum replaces serial loop | **+2.1% tok/s** |
+
+### Kept (Manual)
 | Approach | Result | Impact |
 |----------|--------|--------|
 | FMA dequant kernel | GPU compute -12% | **+12% tok/s** |
@@ -229,11 +307,22 @@ metal_infer/
 | Speculative early routing | -38% | Cache pollution + overhead |
 | MTP speculative decoding | break-even | MoE I/O scales per-token (unlike dense) |
 
+### Discarded (iOS-specific)
+| Approach | Result | Why |
+|----------|--------|-----|
+| Single 5.5GB Metal buffer (397B weights) | Crash | Metal hard limit: 4096 MB per buffer, not configurable |
+| Two overlapping Metal buffers (~3GB each) | OOM kill | Metal tracks ~8GB shared memory on 12GB device |
+| 50MB staging buffer + memcpy per dispatch | Data corruption | In-flight command buffers alias single staging buffer; later memcpys overwrite earlier tensor data before GPU reads |
+| K=2 on 397B (trained K=10) | Gibberish | Only 20% of trained expert capacity fires, output distribution collapses |
+| K=4 on 397B (trained K=10) | Degenerate ("!!!!") | 40% capacity insufficient for 512-expert model |
+| File Provider Storage for model access | +latency | File coordination layer adds overhead to every pread |
+
 ## Safety
 
-This is a primary development machine. The engine explicitly controls memory:
+The engine explicitly controls memory:
 - Non-expert weights: model-dependent (e.g., 5.5GB for 397B, ~1.5GB for 35B, mmap'd read-only)
-- Metal scratch buffers: ~200MB
+- Metal scratch buffers: ~200MB (desktop), ~500MB (397B on iPhone with reduced context)
 - Expert data streams from SSD on demand — no full model load required
 - No custom caches. Trust the OS page cache for expert LRU.
-- Minimum RAM: 24GB (35B-A3B 4-bit), 48GB (397B-A17B 4-bit)
+- iOS: adaptive context length via `os_proc_available_memory()`, KV caches sized to fit device
+- Minimum RAM: 8GB iPhone (35B), 12GB iPhone (397B with K=4), 24GB Mac (35B), 48GB Mac (397B)

@@ -1,0 +1,11 @@
+id	timestamp	commit	tok_s	math	json	status	notes
+000	2026-03-21T01:45:41	0c2827f	5.62	PASS	PASS	baseline	Unmodified baseline
+001	2026-03-21T01:47:25	33bf261	5.63	PASS	PASS	keep	SIMD reduction in rms_norm_qk + gated_rms_norm (replace serial thread-0 loop)
+002	2026-03-21T01:48:54	a768791	5.97	PASS	PASS	keep	FMA optimization in 2-bit dequant kernel — +6% from baseline
+003	2026-03-21T01:50:57	e6c21c2	5.86	PASS	PASS	discard	Single compute encoder for batch matvec — regression, GPU serializes
+004	2026-03-21T01:52:45	ecfab24	5.37	PASS	PASS	discard	FMA in matvec_fast — regression, no shared x cache means extra device reads
+005	2026-03-21T01:55:04	4836dd8	5.76	PASS	PASS	discard	SwiGLU vec4 — regression, poor occupancy at small dim
+006	2026-03-21T01:57:37	39ff380	5.36	PASS	PASS	discard	v3 kernel with 8192 shared mem — regression, occupancy drop from 32KB threadgroup mem
+007	2026-03-21T01:59:47	b0a3e42	5.84	PASS	PASS	discard	matvec_fast tg_size 64->128 — regression
+008	2026-03-21T02:02:32	6c280cd	6.30	PASS	PASS	keep	Half-precision x_shared in v3 kernel — 8KB shared mem, +12% from baseline
+009	2026-03-21T02:04:02	1282be7	6.48	PASS	PASS	keep	Half-precision x_shared in 2-bit kernel — +15.3% total from baseline

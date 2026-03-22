@@ -1,0 +1,506 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0BA5B28A95E8C0616CCA6A3D /* FlashMoEApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EAF41B16BD4314D3642DC53 /* FlashMoEApp.swift */; };
+		15BBE610777A6EF58279A4E3 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2AEBDCE15020A40A8451CB5A /* ContentView.swift */; };
+		23E305445AFD3D5FB1A5E5FC /* ModelListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDD107A34A4DAEABC7E9ECFB /* ModelListView.swift */; };
+		368893C82D55ADC634FBAD8B /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8A8F6936F5C735B8856277A2 /* Metal.framework */; };
+		5F7FD44C4FF2E97505EDAB58 /* FlashMoEBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 749C35B05B7C71B73796EEE6 /* FlashMoEBridge.swift */; };
+		86FB8D83EC8F2AA092081685 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAC1A43E0715A9CDE325FFC0 /* ChatView.swift */; };
+		A40E8D436A3EEDB8B04CDC44 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DEE08D3053B24D1E206627F9 /* Assets.xcassets */; };
+		AA1111111111111111111111 /* ModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2222222222222222222222 /* ModelCatalog.swift */; };
+		BB1111111111111111111111 /* DownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB2222222222222222222222 /* DownloadManager.swift */; };
+		CC1111111111111111111111 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC2222222222222222222222 /* AppDelegate.swift */; };
+		D2F140EBFBCC62B37BDBCB7F /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3321AD5929C6B6D4FAD446C8 /* Foundation.framework */; };
+		D8242F5999552BC228A650CE /* shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = EEC822B6F9CE0BABA49E989B /* shaders.metal */; };
+		DD1111111111111111111111 /* ModelDownloadRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD2222222222222222222222 /* ModelDownloadRow.swift */; };
+		E73BB005AD9F878023B7F75E /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 51FB34EBC20226BA8269877A /* Accelerate.framework */; };
+		EE1111111111111111111111 /* ProfilerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE2222222222222222222222 /* ProfilerView.swift */; };
+		F00087500AE558979B35EE06 /* FlashMoEEngine.m in Sources */ = {isa = PBXBuildFile; fileRef = 50DF36AC37579556033D375F /* FlashMoEEngine.m */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		03B08EB0D0CE594165AB1C14 /* FlashMoE-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "FlashMoE-Bridging-Header.h"; sourceTree = "<group>"; };
+		2AEBDCE15020A40A8451CB5A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		3321AD5929C6B6D4FAD446C8 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
+		3404570FACF1297B40EF6369 /* FlashMoEEngine.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = FlashMoEEngine.h; sourceTree = "<group>"; };
+		50DF36AC37579556033D375F /* FlashMoEEngine.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = FlashMoEEngine.m; sourceTree = "<group>"; };
+		51FB34EBC20226BA8269877A /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
+		575B85659731B0C7F170E59E /* tokenizer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = tokenizer.h; sourceTree = "<group>"; };
+		64E904A15D9438F2D9B365F5 /* FlashMoE.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FlashMoE.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		749C35B05B7C71B73796EEE6 /* FlashMoEBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlashMoEBridge.swift; sourceTree = "<group>"; };
+		82BDA279F2267A8FD313D3C3 /* FlashMoE.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FlashMoE.entitlements; sourceTree = "<group>"; };
+		8A8F6936F5C735B8856277A2 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		8EAF41B16BD4314D3642DC53 /* FlashMoEApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlashMoEApp.swift; sourceTree = "<group>"; };
+		AA2222222222222222222222 /* ModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelCatalog.swift; sourceTree = "<group>"; };
+		BAC1A43E0715A9CDE325FFC0 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		BB2222222222222222222222 /* DownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadManager.swift; sourceTree = "<group>"; };
+		CC2222222222222222222222 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		DD2222222222222222222222 /* ModelDownloadRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelDownloadRow.swift; sourceTree = "<group>"; };
+		DDD107A34A4DAEABC7E9ECFB /* ModelListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelListView.swift; sourceTree = "<group>"; };
+		DEE08D3053B24D1E206627F9 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		EE2222222222222222222222 /* ProfilerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilerView.swift; sourceTree = "<group>"; };
+		EEC822B6F9CE0BABA49E989B /* shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = shaders.metal; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		FD2BB59A0A54FF99587D143D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				368893C82D55ADC634FBAD8B /* Metal.framework in Frameworks */,
+				D2F140EBFBCC62B37BDBCB7F /* Foundation.framework in Frameworks */,
+				E73BB005AD9F878023B7F75E /* Accelerate.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		18638B2F96B8C1EB7D55C874 /* Bridge */ = {
+			isa = PBXGroup;
+			children = (
+				03B08EB0D0CE594165AB1C14 /* FlashMoE-Bridging-Header.h */,
+				749C35B05B7C71B73796EEE6 /* FlashMoEBridge.swift */,
+			);
+			path = Bridge;
+			sourceTree = "<group>";
+		};
+		1BE036041A7213E9AE43E96C /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				64E904A15D9438F2D9B365F5 /* FlashMoE.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		42B268D8ECA1DA8E59B4F599 /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		436D67F159A3C0FA4F05317F /* metal_infer */ = {
+			isa = PBXGroup;
+			children = (
+				EEC822B6F9CE0BABA49E989B /* shaders.metal */,
+				575B85659731B0C7F170E59E /* tokenizer.h */,
+			);
+			name = metal_infer;
+			path = ../metal_infer;
+			sourceTree = "<group>";
+		};
+		5A512650C4615EA193374D2F /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				DEE08D3053B24D1E206627F9 /* Assets.xcassets */,
+				82BDA279F2267A8FD313D3C3 /* FlashMoE.entitlements */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		7066FB671F127A31C9768B99 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				51FB34EBC20226BA8269877A /* Accelerate.framework */,
+				3321AD5929C6B6D4FAD446C8 /* Foundation.framework */,
+				8A8F6936F5C735B8856277A2 /* Metal.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		7DC3D96AAD773F68496A645B /* App */ = {
+			isa = PBXGroup;
+			children = (
+				CC2222222222222222222222 /* AppDelegate.swift */,
+				8EAF41B16BD4314D3642DC53 /* FlashMoEApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		9072059C570A7ED56A540CBE = {
+			isa = PBXGroup;
+			children = (
+				7DC3D96AAD773F68496A645B /* App */,
+				18638B2F96B8C1EB7D55C874 /* Bridge */,
+				EDA325EB4F586262787DC634 /* FlashMoEEngine */,
+				436D67F159A3C0FA4F05317F /* metal_infer */,
+				AA3333333333333333333333 /* Models */,
+				5A512650C4615EA193374D2F /* Resources */,
+				BB3333333333333333333333 /* Services */,
+				42B268D8ECA1DA8E59B4F599 /* ViewModels */,
+				993DF219F89AA4229E9A43D2 /* Views */,
+				7066FB671F127A31C9768B99 /* Frameworks */,
+				1BE036041A7213E9AE43E96C /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		993DF219F89AA4229E9A43D2 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				BAC1A43E0715A9CDE325FFC0 /* ChatView.swift */,
+				2AEBDCE15020A40A8451CB5A /* ContentView.swift */,
+				DD2222222222222222222222 /* ModelDownloadRow.swift */,
+				DDD107A34A4DAEABC7E9ECFB /* ModelListView.swift */,
+				EE2222222222222222222222 /* ProfilerView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		AA3333333333333333333333 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				AA2222222222222222222222 /* ModelCatalog.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		BB3333333333333333333333 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				BB2222222222222222222222 /* DownloadManager.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		EDA325EB4F586262787DC634 /* FlashMoEEngine */ = {
+			isa = PBXGroup;
+			children = (
+				3404570FACF1297B40EF6369 /* FlashMoEEngine.h */,
+				50DF36AC37579556033D375F /* FlashMoEEngine.m */,
+			);
+			path = FlashMoEEngine;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		F64C8CE03661205C4C06D1FF /* FlashMoE */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A992692CC1A07BC40EFA0D3E /* Build configuration list for PBXNativeTarget "FlashMoE" */;
+			buildPhases = (
+				D57FD46C656820096AA63872 /* Sources */,
+				E55762DD03B859815792AC85 /* Resources */,
+				FD2BB59A0A54FF99587D143D /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = FlashMoE;
+			packageProductDependencies = (
+			);
+			productName = FlashMoE;
+			productReference = 64E904A15D9438F2D9B365F5 /* FlashMoE.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		D6A8CACD08FF01EA2A8633B6 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+			};
+			buildConfigurationList = 716F6ADA7E507FC5C74161A0 /* Build configuration list for PBXProject "FlashMoE" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 9072059C570A7ED56A540CBE;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 1BE036041A7213E9AE43E96C /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				F64C8CE03661205C4C06D1FF /* FlashMoE */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		E55762DD03B859815792AC85 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A40E8D436A3EEDB8B04CDC44 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		D57FD46C656820096AA63872 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D8242F5999552BC228A650CE /* shaders.metal in Sources */,
+				CC1111111111111111111111 /* AppDelegate.swift in Sources */,
+				86FB8D83EC8F2AA092081685 /* ChatView.swift in Sources */,
+				15BBE610777A6EF58279A4E3 /* ContentView.swift in Sources */,
+				BB1111111111111111111111 /* DownloadManager.swift in Sources */,
+				0BA5B28A95E8C0616CCA6A3D /* FlashMoEApp.swift in Sources */,
+				5F7FD44C4FF2E97505EDAB58 /* FlashMoEBridge.swift in Sources */,
+				F00087500AE558979B35EE06 /* FlashMoEEngine.m in Sources */,
+				AA1111111111111111111111 /* ModelCatalog.swift in Sources */,
+				DD1111111111111111111111 /* ModelDownloadRow.swift in Sources */,
+				23E305445AFD3D5FB1A5E5FC /* ModelListView.swift in Sources */,
+				EE1111111111111111111111 /* ProfilerView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		20C11034B98051ECF5657F59 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_UIFileSharingEnabled = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		8C87D5217C25485D83AEE132 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_UIFileSharingEnabled = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		A93B546F9091A305E7C156B1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_ENTITLEMENTS = Resources/FlashMoE.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				DEVELOPMENT_TEAM = 5297SX54T2;
+				GCC_OPTIMIZATION_LEVEL = 2;
+				GCC_WARN_INHIBIT_ALL_WARNINGS = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/FlashMoEEngine",
+					"$(SRCROOT)/../metal_infer",
+				);
+				INFOPLIST_KEY_CFBundleDisplayName = "Flash-MoE";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				OTHER_CFLAGS = (
+					"-DCHAT_MODE=1",
+					"-DACCELERATE_NEW_LAPACK",
+				);
+				OTHER_LDFLAGS = "-lcompression";
+				PRODUCT_BUNDLE_IDENTIFIER = com.alexintosh.flashmoe;
+				PRODUCT_NAME = FlashMoE;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = "Bridge/FlashMoE-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		F06D0A6E051D510D77122F00 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_ENTITLEMENTS = Resources/FlashMoE.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				DEVELOPMENT_TEAM = 5297SX54T2;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				GCC_OPTIMIZATION_LEVEL = 2;
+				GCC_WARN_INHIBIT_ALL_WARNINGS = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/FlashMoEEngine",
+					"$(SRCROOT)/../metal_infer",
+				);
+				INFOPLIST_KEY_CFBundleDisplayName = "Flash-MoE";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				OTHER_CFLAGS = (
+					"-DCHAT_MODE=1",
+					"-DACCELERATE_NEW_LAPACK",
+				);
+				OTHER_LDFLAGS = "-lcompression";
+				PRODUCT_BUNDLE_IDENTIFIER = com.alexintosh.flashmoe;
+				PRODUCT_NAME = FlashMoE;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = "Bridge/FlashMoE-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		716F6ADA7E507FC5C74161A0 /* Build configuration list for PBXProject "FlashMoE" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8C87D5217C25485D83AEE132 /* Debug */,
+				20C11034B98051ECF5657F59 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A992692CC1A07BC40EFA0D3E /* Build configuration list for PBXNativeTarget "FlashMoE" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F06D0A6E051D510D77122F00 /* Debug */,
+				A93B546F9091A305E7C156B1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = D6A8CACD08FF01EA2A8633B6 /* Project object */;
+}

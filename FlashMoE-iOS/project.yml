@@ -1,0 +1,75 @@
+name: FlashMoE
+options:
+  bundleIdPrefix: com.flashmoe
+  deploymentTarget:
+    iOS: "18.0"
+  xcodeVersion: "26.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    TARGETED_DEVICE_FAMILY: "1"  # iPhone only
+    INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES
+    INFOPLIST_KEY_UIFileSharingEnabled: YES
+
+targets:
+  FlashMoE:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        type: group
+      - path: Views
+        type: group
+      - path: ViewModels
+        type: group
+      - path: Bridge
+        type: group
+      - path: FlashMoEEngine
+        type: group
+      - path: Resources
+        type: group
+      # Metal shaders — copied as resource (compiled at runtime via newLibraryWithSource)
+      - path: ../metal_infer/shaders.metal
+        type: file
+        buildPhase: resources
+      # Tokenizer header — needed by infer.m
+      - path: ../metal_infer/tokenizer.h
+        type: file
+        buildPhase: headers
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.flashmoe.ios
+        PRODUCT_NAME: FlashMoE
+        SWIFT_OBJC_BRIDGING_HEADER: Bridge/FlashMoE-Bridging-Header.h
+        # Obj-C / C compilation flags for infer.m unity build
+        OTHER_CFLAGS: "-DCHAT_MODE=1 -DACCELERATE_NEW_LAPACK"
+        # Header search paths
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/FlashMoEEngine
+          - $(SRCROOT)/../metal_infer
+        # Needed for the engine
+        CLANG_ENABLE_OBJC_ARC: YES
+        GCC_OPTIMIZATION_LEVEL: "2"
+        GCC_WARN_INHIBIT_ALL_WARNINGS: NO
+        # Memory / entitlements
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Info.plist keys
+        INFOPLIST_KEY_CFBundleDisplayName: "Flash-MoE"
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        # Linker flags for compression library
+        OTHER_LDFLAGS: "-lcompression"
+    dependencies:
+      - sdk: Metal.framework
+      - sdk: Foundation.framework
+      - sdk: Accelerate.framework
+    preBuildScripts: []
+    postBuildScripts: []
+    entitlements:
+      path: Resources/FlashMoE.entitlements
+      properties:
+        com.apple.security.app-sandbox: true

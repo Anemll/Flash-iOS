@@ -48,6 +48,8 @@ def main():
                         help='Output directory for model_weights.bin and .json')
     parser.add_argument('--include-experts', action='store_true',
                         help='Also extract expert weights (huge, not recommended)')
+    parser.add_argument('--split', type=float, default=0,
+                        help='Split output into chunks of at most N GB (e.g. --split 3.5 for iOS Metal limit)')
     args = parser.parse_args()
 
     model_path = Path(args.model)
@@ -154,59 +156,102 @@ def main():
             layer_types.append("linear_attention")
     manifest["config"]["layer_types"] = layer_types
 
-    print(f"\nWriting {bin_path}...")
+    split_bytes = int(args.split * 1e9) if args.split > 0 else 0
+
+    print(f"\nWriting weights...")
+    if split_bytes > 0:
+        print(f"  Split mode: chunks of max {args.split:.1f} GB ({split_bytes} bytes)")
     t0 = time.time()
-    offset = 0
+    offset = 0       # logical offset across all chunks
     total_bytes = 0
+    chunk_idx = 0
+    chunk_offset = 0  # bytes written to current chunk file
+    chunk_paths = []
+    split_offsets = [0]  # logical offset where each chunk starts
 
     ALIGN = 64  # 64-byte alignment for Metal buffers
 
-    with open(bin_path, 'wb') as out_f:
-        for i, (san_name, orig_name, filename) in enumerate(all_tensors):
-            filepath = model_path / filename
-            header, data_start = header_cache[filename]
+    # Determine output file name
+    if split_bytes > 0:
+        cur_bin_path = output_dir / 'model_weights.bin'
+    else:
+        cur_bin_path = bin_path
+    chunk_paths.append(str(cur_bin_path))
 
-            if orig_name not in header:
-                print(f"  WARNING: {orig_name} not found in {filename}, skipping")
-                continue
+    out_f = open(cur_bin_path, 'wb')
 
-            meta = header[orig_name]
-            tensor_offsets = meta['data_offsets']
-            byte_len = tensor_offsets[1] - tensor_offsets[0]
-            shape = meta['shape']
-            dtype = meta['dtype']
+    for i, (san_name, orig_name, filename) in enumerate(all_tensors):
+        filepath = model_path / filename
+        header, data_start = header_cache[filename]
 
-            # Align offset
-            if offset % ALIGN != 0:
-                pad = ALIGN - (offset % ALIGN)
-                out_f.write(b'\x00' * pad)
-                offset += pad
+        if orig_name not in header:
+            print(f"  WARNING: {orig_name} not found in {filename}, skipping")
+            continue
 
-            # Read tensor data from safetensors
-            with open(filepath, 'rb') as sf:
-                sf.seek(data_start + tensor_offsets[0])
-                data = sf.read(byte_len)
+        meta = header[orig_name]
+        tensor_offsets = meta['data_offsets']
+        byte_len = tensor_offsets[1] - tensor_offsets[0]
+        shape = meta['shape']
+        dtype = meta['dtype']
 
-            out_f.write(data)
+        # Check if we need to start a new chunk
+        # (only split between tensors, not mid-tensor)
+        if split_bytes > 0 and chunk_offset > 0 and chunk_offset + byte_len + ALIGN > split_bytes:
+            out_f.close()
+            chunk_idx += 1
+            chunk_suffix = f"_{chunk_idx}"
+            cur_bin_path = output_dir / f'model_weights{chunk_suffix}.bin'
+            chunk_paths.append(str(cur_bin_path))
+            split_offsets.append(offset)
+            out_f = open(cur_bin_path, 'wb')
+            chunk_offset = 0
+            print(f"  --- Chunk {chunk_idx} starts at logical offset {offset} ({offset/1e9:.2f} GB) ---")
 
-            manifest["tensors"][san_name] = {
-                "offset": offset,
-                "size": byte_len,
-                "shape": shape,
-                "dtype": dtype,
-            }
+        # Align offset
+        if offset % ALIGN != 0:
+            pad = ALIGN - (offset % ALIGN)
+            out_f.write(b'\x00' * pad)
+            offset += pad
+            chunk_offset += pad
 
-            offset += byte_len
-            total_bytes += byte_len
+        # Read tensor data from safetensors
+        with open(filepath, 'rb') as sf:
+            sf.seek(data_start + tensor_offsets[0])
+            data = sf.read(byte_len)
 
-            if (i + 1) % 100 == 0 or i == len(all_tensors) - 1:
-                print(f"  [{i+1}/{len(all_tensors)}] {total_bytes / 1e9:.2f} GB written")
+        out_f.write(data)
+
+        manifest["tensors"][san_name] = {
+            "offset": offset,
+            "size": byte_len,
+            "shape": shape,
+            "dtype": dtype,
+        }
+
+        offset += byte_len
+        chunk_offset += byte_len
+        total_bytes += byte_len
+
+        if (i + 1) % 100 == 0 or i == len(all_tensors) - 1:
+            print(f"  [{i+1}/{len(all_tensors)}] {total_bytes / 1e9:.2f} GB written (chunk {chunk_idx})")
+
+    out_f.close()
 
     elapsed = time.time() - t0
-    throughput = total_bytes / elapsed / 1e9
+    throughput = total_bytes / elapsed / 1e9 if elapsed > 0 else 0
 
     print(f"\nDone: {total_bytes / 1e9:.2f} GB in {elapsed:.1f}s ({throughput:.1f} GB/s)")
-    print(f"Binary: {bin_path} ({os.path.getsize(bin_path) / 1e9:.2f} GB)")
+    for cp in chunk_paths:
+        print(f"  {cp} ({os.path.getsize(cp) / 1e9:.2f} GB)")
+
+    # Store split info in manifest
+    if len(chunk_paths) > 1:
+        manifest["split"] = {
+            "num_chunks": len(chunk_paths),
+            "chunk_files": [os.path.basename(p) for p in chunk_paths],
+            "split_offsets": split_offsets,
+        }
+        print(f"  Split into {len(chunk_paths)} chunks: {[os.path.basename(p) for p in chunk_paths]}")
 
     # Write manifest
     json_path = output_dir / 'model_weights.json'
