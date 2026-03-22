@@ -60,7 +60,9 @@ struct ChatView: View {
                 StatsBar(
                     tokensPerSecond: engine.tokensPerSecond,
                     tokensGenerated: engine.tokensGenerated,
-                    isGenerating: isGenerating
+                    isGenerating: isGenerating,
+                    ttftMs: engine.timeToFirstToken,
+                    thermalState: ProcessInfo.processInfo.thermalState
                 )
             }
 
@@ -314,9 +316,42 @@ struct StatsBar: View {
     let tokensPerSecond: Double
     let tokensGenerated: Int
     let isGenerating: Bool
+    var ttftMs: Double = 0
+    var thermalState: ProcessInfo.ThermalState = .nominal
+
+    private var ttftText: String {
+        if ttftMs <= 0 { return "" }
+        if ttftMs > 500_000 {
+            return String(format: "%.1f min", ttftMs / 60_000)
+        } else if ttftMs > 1000 {
+            return String(format: "%.1fs", ttftMs / 1000)
+        } else {
+            return String(format: "%.0fms", ttftMs)
+        }
+    }
+
+    private var thermalIcon: String {
+        switch thermalState {
+        case .nominal: return "thermometer.low"
+        case .fair: return "thermometer.medium"
+        case .serious: return "thermometer.high"
+        case .critical: return "thermometer.sun.fill"
+        @unknown default: return "thermometer.medium"
+        }
+    }
+
+    private var thermalColor: Color {
+        switch thermalState {
+        case .nominal: return .green
+        case .fair: return .yellow
+        case .serious: return .orange
+        case .critical: return .red
+        @unknown default: return .gray
+        }
+    }
 
     var body: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 12) {
             Label(String(format: "%.1f tok/s", tokensPerSecond), systemImage: "speedometer")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -324,6 +359,16 @@ struct StatsBar: View {
             Label("\(tokensGenerated) tokens", systemImage: "number")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            if !ttftText.isEmpty {
+                Label(ttftText, systemImage: "clock")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Image(systemName: thermalIcon)
+                .font(.caption)
+                .foregroundStyle(thermalColor)
 
             Spacer()
 
