@@ -1,3 +1,4 @@
+#if canImport(UIKit) && !isMacro
 /*
  * AppDelegate.swift — Background URL session event handling
  *
@@ -18,3 +19,4 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         }
     }
 }
+#endif

@@ -30,6 +30,7 @@ struct ModelListView: View {
     @State private var isScanning = true
     @State private var loadError: String?
     @State private var selectedModel: LocalModel?
+    @AppStorage("cacheIOSplit") private var cacheIOSplit: Int = 1
     private let downloadManager = DownloadManager.shared
 
     var body: some View {
@@ -77,6 +78,21 @@ struct ModelListView: View {
                         downloadManager: downloadManager,
                         isDownloaded: !hasActiveDownload && downloadManager.isModelDownloaded(entry.id)
                     )
+                }
+            }
+
+            Section("I/O Settings") {
+                Picker("Expert I/O Fanout", selection: $cacheIOSplit) {
+                    Text("Off (single pread)").tag(1)
+                    Text("2 chunks").tag(2)
+                    Text("4 chunks").tag(4)
+                    Text("8 chunks").tag(8)
+                }
+                .pickerStyle(.menu)
+                if cacheIOSplit > 1 {
+                    Text("Splits each expert read into \(cacheIOSplit) page-aligned chunks for parallel SSD reads. Reload model to apply.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -144,6 +160,7 @@ struct ModelListView: View {
                 try await engine.loadModel(
                     at: model.path,
                     useTiered: model.hasTiered,
+                    cacheIOSplit: cacheIOSplit,
                     verbose: true
                 )
             } catch {
@@ -222,10 +239,8 @@ enum ModelScanner {
             await scanDirectory(docsDir.path, into: &models)
         }
 
-        // Scan app's shared container (for Files.app access)
-        if let containerDir = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.flashmoe") {
-            await scanDirectory(containerDir.path, into: &models)
-        }
+        // Note: App Groups container removed — no entitlement configured.
+        // Models are discovered from the Documents directory (accessible via Files.app).
 
         return models.sorted { $0.name < $1.name }
     }
@@ -242,6 +257,8 @@ enum ModelScanner {
 
             // Check if it's a valid model
             if FlashMoEEngine.validateModel(at: fullPath) {
+                // Protect model files from iOS storage optimization / purging
+                excludeFromBackup(URL(fileURLWithPath: fullPath))
                 let size = directorySize(at: fullPath)
                 let hasTiered = fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("packed_experts_tiered/layer_00.bin"))
                 let has4bit = fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("packed_experts/layer_00.bin"))
@@ -271,5 +288,22 @@ enum ModelScanner {
             }
         }
         return total
+    }
+
+    /// Mark a directory (and its contents) as excluded from iCloud backup and
+    /// iOS storage optimization, preventing the system from purging model files.
+    private static func excludeFromBackup(_ url: URL) {
+        var url = url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? url.setResourceValues(values)
+
+        // Also mark all files inside
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: nil) else { return }
+        while let fileURL = enumerator.nextObject() as? URL {
+            var fileURL = fileURL
+            try? fileURL.setResourceValues(values)
+        }
     }
 }

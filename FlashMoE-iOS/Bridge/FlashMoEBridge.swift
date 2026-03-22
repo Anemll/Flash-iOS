@@ -74,7 +74,8 @@ final class FlashMoEEngine: @unchecked Sendable {
 
     /// Load a model from the given path. Runs on a background thread.
     func loadModel(at path: String, maxContext: Int = 0, thinkBudget: Int = 2048,
-                   useTiered: Bool = false, verbose: Bool = false) async throws {
+                   useTiered: Bool = false, cacheIOSplit: Int = 1,
+                   verbose: Bool = false) async throws {
         guard state != .loading && state != .generating else {
             throw FlashMoEError.busy
         }
@@ -105,6 +106,7 @@ final class FlashMoEEngine: @unchecked Sendable {
                 config.max_context = Int32(maxContext)
                 config.think_budget = Int32(thinkBudget)
                 config.use_tiered = useTiered ? 1 : 0
+                config.cache_io_split = Int32(cacheIOSplit)
                 config.verbose = verbose ? 1 : 0
 
                 // Load

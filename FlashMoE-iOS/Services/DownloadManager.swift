@@ -246,8 +246,20 @@ final class DownloadManager: NSObject, @unchecked Sendable {
             overallProgress = 1.0
             persistState()
 
-            // Validate the model
+            // Protect from iOS storage optimization (exclude from backup/purge)
             let dir = modelDirectory(for: entry.id)
+            var dirURL = dir
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try? dirURL.setResourceValues(values)
+            if let enumerator = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil) {
+                while let fileURL = enumerator.nextObject() as? URL {
+                    var fURL = fileURL
+                    try? fURL.setResourceValues(values)
+                }
+            }
+
+            // Validate the model
             if !FlashMoEEngine.validateModel(at: dir.path) {
                 error = "Download complete but model validation failed"
                 state.status = .failed

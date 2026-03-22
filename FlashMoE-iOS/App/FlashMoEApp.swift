@@ -9,8 +9,10 @@ import SwiftUI
 
 @main
 struct FlashMoEApp: App {
+#if os(iOS)
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @State private var engine = FlashMoEEngine()
+#endif
+    @State private var engine: FlashMoEEngine = .init()
 
     var body: some Scene {
         WindowGroup {
@@ -19,3 +21,4 @@ struct FlashMoEApp: App {
         }
     }
 }
+

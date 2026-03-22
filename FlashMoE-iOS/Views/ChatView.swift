@@ -102,6 +102,7 @@ struct ChatView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: showProfiler)
         .navigationTitle("Flash-MoE")
+#if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -121,11 +122,48 @@ struct ChatView: View {
                     Button("Show Stats", systemImage: "chart.bar") {
                         showStats.toggle()
                     }
+                    Divider()
+                    Button("Models & Settings", systemImage: "gearshape") {
+                        messages.removeAll()
+                        engine.reset()
+                        engine.unloadModel()
+                    }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
             }
         }
+#else
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button(action: { showModelInfo = true }) {
+                    Image(systemName: "cpu")
+                }
+            }
+            ToolbarItem(placement: .automatic) {
+                Menu {
+                    Button("New Chat", systemImage: "plus.message") {
+                        messages.removeAll()
+                        engine.reset()
+                    }
+                    Button(showProfiler ? "Hide Profiler" : "Profiler", systemImage: "gauge.with.dots.needle.50percent") {
+                        showProfiler.toggle()
+                    }
+                    Button("Show Stats", systemImage: "chart.bar") {
+                        showStats.toggle()
+                    }
+                    Divider()
+                    Button("Models & Settings", systemImage: "gearshape") {
+                        messages.removeAll()
+                        engine.reset()
+                        engine.unloadModel()
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+            }
+        }
+#endif
         .sheet(isPresented: $showModelInfo) {
             ModelInfoSheet(info: engine.modelInfo)
         }
@@ -256,7 +294,11 @@ struct MessageBubble: View {
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
+                    #if os(iOS)
                     .background(Color(.systemGray6))
+                    #else
+                    .background(.thinMaterial)
+                    #endif
                     .clipShape(RoundedRectangle(cornerRadius: 14))
                 }
 
@@ -267,7 +309,11 @@ struct MessageBubble: View {
                         .textSelection(.enabled)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
+                        #if os(iOS)
                         .background(message.role == .user ? Color.blue : Color(.systemGray5))
+                        #else
+                        .background(message.role == .user ? Color.blue : Color.secondary)
+                        #endif
                         .foregroundStyle(message.role == .user ? .white : .primary)
                         .clipShape(RoundedRectangle(cornerRadius: 18))
                 }
@@ -276,7 +322,11 @@ struct MessageBubble: View {
                     ThinkingIndicator()
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
+                        #if os(iOS)
                         .background(Color(.systemGray5))
+                        #else
+                        .background(.quaternary)
+                        #endif
                         .clipShape(RoundedRectangle(cornerRadius: 18))
                 }
             }
@@ -365,7 +415,9 @@ struct ModelInfoSheet: View {
                 Text("No model loaded")
             }
         }
+#if os(iOS)
         .presentationDetents([.medium])
+#endif
     }
 }
 
@@ -383,3 +435,4 @@ struct InfoRow: View {
         }
     }
 }
+

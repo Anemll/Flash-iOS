@@ -36,6 +36,7 @@ typedef struct {
     int max_context;            // Max sequence length (0 = use model default)
     int think_budget;           // Max thinking tokens (0 = unlimited)
     int use_tiered;             // 1 = use tiered quantization if available, 0 = auto-detect
+    int cache_io_split;         // >1 = split each expert pread into N page-aligned chunks (fanout), 0/1 = disabled
     int verbose;                // 1 = log to stderr, 0 = quiet
 } FlashMoEConfig;
 

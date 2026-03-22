@@ -119,7 +119,24 @@ int flashmoe_load(FlashMoEContext *ctx, const FlashMoEConfig *config) {
         // iOS: adaptive context length based on available device memory
         // KV cost per position = num_kv_heads * head_dim * 4 bytes * 2 (k+v) * num_full_attn_layers * 2 (CPU+GPU)
         {
+#if TARGET_OS_IPHONE || TARGET_OS_IOS
             size_t avail = os_proc_available_memory();
+#else
+            // macOS fallback: estimate available memory using host_statistics64
+            mach_port_t host = mach_host_self();
+            vm_size_t pageSize = 0;
+            host_page_size(host, &pageSize);
+            vm_statistics64_data_t vmStats = {0};
+            mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+            kern_return_t kr = host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vmStats, &count);
+            size_t avail = 0;
+            if (kr == KERN_SUCCESS) {
+                uint64_t freePages = vmStats.free_count;
+                uint64_t inactivePages = vmStats.inactive_count;
+                uint64_t speculativePages = vmStats.speculative_count;
+                avail = (size_t)((freePages + inactivePages + speculativePages) * (uint64_t)pageSize);
+            }
+#endif
             size_t kv_cost_per_pos = (size_t)cfg.num_kv_heads * cfg.head_dim * sizeof(float)
                                      * 2  // k + v
                                      * cfg.num_full_attn_layers
@@ -145,6 +162,13 @@ int flashmoe_load(FlashMoEContext *ctx, const FlashMoEConfig *config) {
         // Set tiered mode
         g_use_tiered = config->use_tiered;
         g_use_2bit = 0;
+
+        // Set cache I/O split (fanout mode): >1 = split expert preads into N chunks
+        if (config->cache_io_split > 1) {
+            g_cache_io_split = config->cache_io_split;
+        } else {
+            g_cache_io_split = 1;  // disabled by default
+        }
 
         // K = experts per token from config
         ctx->K = cfg.num_experts_per_tok;
@@ -291,6 +315,12 @@ void flashmoe_unload(FlashMoEContext *ctx) {
             g_deferred.cmd_experts = nil;
         }
 
+        // Wait for any in-flight async pread
+        if (g_async_pread.active) {
+            dispatch_group_wait(g_async_pread.group, DISPATCH_TIME_FOREVER);
+            g_async_pread.active = 0;
+        }
+
         // Shutdown I/O pool
         io_pool_shutdown();
 
@@ -329,12 +359,63 @@ void flashmoe_unload(FlashMoEContext *ctx) {
         // Free deferred state
         free(g_deferred.h_mid); g_deferred.h_mid = NULL;
 
+        // Free weight file (munmap + manifest)
+        if (ctx->wf) {
+            if (ctx->wf->data) munmap(ctx->wf->data, ctx->wf->size);
+            if (ctx->wf->manifest) {
+                free(ctx->wf->manifest->tensors);
+                free(ctx->wf->manifest);
+            }
+            free(ctx->wf);
+            ctx->wf = NULL;
+        }
+        ctx->final_norm_w = NULL;
+
+        // Reset tensor hash table (points into freed manifest)
+        memset(tensor_ht, 0, sizeof(tensor_ht));
+        tensor_ht_built = 0;
+
+        // Free vocabulary
+        if (ctx->vocab) {
+            free(ctx->vocab);
+            ctx->vocab = NULL;
+        }
+
+        // Free config dynamic arrays
+        free(cfg.is_full_attn); cfg.is_full_attn = NULL;
+
+        // Free tracking arrays (allocated by alloc_tracking_arrays)
+        free(g_expert_freq);    g_expert_freq = NULL;
+        free(g_expert_seen);    g_expert_seen = NULL;
+        free(g_lz4_index);      g_lz4_index = NULL;
+        free(g_cache_seen);     g_cache_seen = NULL;
+        free(g_cache_last_touch_token); g_cache_last_touch_token = NULL;
+        free(g_cache_last_evict_token); g_cache_last_evict_token = NULL;
+        free(g_pred_experts);   g_pred_experts = NULL;
+        free(g_pred_count);     g_pred_count = NULL;
+
+        // Reset layer cache so it rebuilds on next load
+        free(layer_cache);      layer_cache = NULL;
+        layer_cache_built = 0;
+
         // Free tiered manifest
         if (g_tiered_manifest) {
             free(g_tiered_manifest);
             g_tiered_manifest = NULL;
             g_use_tiered = 0;
         }
+
+        // Reset prediction state
+        g_pred_enabled = 0;
+        g_pred_generating = 0;
+        g_pred_valid = 0;
+        g_pred_hits = 0;
+        g_pred_misses = 0;
+        g_pred_layers = 0;
+
+        // Reset global flags for clean reload
+        g_freq_tracking = 0;
+        g_cache_telemetry_enabled = 0;
 
         // Release Metal context
         // (Note: MetalCtx uses ARC for ObjC objects, but struct is malloc'd)
@@ -890,3 +971,4 @@ const char *flashmoe_last_error(FlashMoEContext *ctx) {
     if (!ctx) return "NULL context";
     return ctx->last_error;
 }
+

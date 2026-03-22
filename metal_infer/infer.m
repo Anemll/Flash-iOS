@@ -569,6 +569,7 @@ static int g_use_lz4 = 0;                        // auto-detected from packed_ex
 static int g_freq_tracking = 0;  // enabled by --freq flag
 static int g_use_2bit = 0;       // enabled by --2bit flag: use packed_experts_2bit/ + 2-bit kernel
 static int g_cache_telemetry_enabled = 0;  // enabled by --cache-telemetry flag
+static int g_cache_io_split = 1;  // >1: split each routed expert pread into N page-aligned chunks (fanout)
 static int g_think_budget = 2048; // max thinking tokens before force-emitting </think>
 
 // Tiered I/O: cold fds (F_NOCACHE) for first reads, warm fds (page cached) for repeats
@@ -3456,6 +3457,7 @@ typedef struct {
     int num_tasks;
     int tasks_completed;
     int generation;          // incremented each dispatch — workers wait for new gen
+    int completed_generation;
     volatile int shutdown;
 } IOThreadPool;
 
@@ -3498,8 +3500,10 @@ static void *io_pool_worker(void *arg) {
 
         pthread_mutex_lock(&g_io_pool.mutex);
         g_io_pool.tasks_completed++;
-        if (g_io_pool.tasks_completed == NUM_IO_THREADS)
+        if (g_io_pool.tasks_completed == NUM_IO_THREADS) {
+            g_io_pool.completed_generation = my_gen;
             pthread_cond_signal(&g_io_pool.work_done);
+        }
     }
     pthread_mutex_unlock(&g_io_pool.mutex);
     return NULL;
@@ -3512,6 +3516,7 @@ static void io_pool_init(void) {
     pthread_cond_init(&g_io_pool.work_done, NULL);
     g_io_pool.shutdown = 0;
     g_io_pool.generation = 0;
+    g_io_pool.completed_generation = 0;
     g_io_pool.tasks = NULL;
     for (int i = 0; i < NUM_IO_THREADS; i++)
         pthread_create(&g_io_pool.threads[i], NULL, io_pool_worker, (void*)(intptr_t)i);
@@ -3520,27 +3525,64 @@ static void io_pool_init(void) {
 
 static dispatch_queue_t g_io_gcd_queue = NULL;
 
-static void io_pool_dispatch(InferPreadTask *tasks, int num_tasks) {
-    if (num_tasks == 0) return;
+// Async start — returns generation number for later wait
+static int io_pool_start(InferPreadTask *tasks, int num_tasks) {
+    if (num_tasks == 0) return 0;
     pthread_mutex_lock(&g_io_pool.mutex);
     g_io_pool.tasks = tasks;
     g_io_pool.num_tasks = num_tasks;
     g_io_pool.tasks_completed = 0;
     g_io_pool.generation++;
+    int gen = g_io_pool.generation;
     pthread_cond_broadcast(&g_io_pool.work_ready);
-    while (g_io_pool.tasks_completed < NUM_IO_THREADS) {
+    pthread_mutex_unlock(&g_io_pool.mutex);
+    return gen;
+}
+
+// Wait for a specific generation to complete
+static void io_pool_wait_generation(int target_gen) {
+    if (target_gen <= 0) return;
+    pthread_mutex_lock(&g_io_pool.mutex);
+    while (g_io_pool.completed_generation < target_gen) {
         pthread_cond_wait(&g_io_pool.work_done, &g_io_pool.mutex);
     }
     pthread_mutex_unlock(&g_io_pool.mutex);
 }
 
+// Synchronous dispatch — start + wait
+static void io_pool_dispatch(InferPreadTask *tasks, int num_tasks) {
+    if (num_tasks == 0) return;
+    int my_gen = io_pool_start(tasks, num_tasks);
+    io_pool_wait_generation(my_gen);
+}
+
 // ---- Async expert pread pipeline ----
-// Starts pread on background GCD threads immediately after routing.
-// The pread overlaps with shared expert prep + next layer's CMD1+attn+CMD2.
-// Wait for completion right before CMD3 needs the expert data.
+// Uses GCD dispatch_group for truly async start+wait (no generation conflicts
+// with the persistent io_pool). When cache_io_split > 1, each expert blob is
+// split into N page-aligned chunks for parallel SSD reads.
+#define MAX_CACHE_IO_SPLIT 8
+
+static inline int active_cache_io_split(size_t esz) {
+    int chunks = g_cache_io_split;
+    if (chunks < 1) chunks = 1;
+    if (chunks > MAX_CACHE_IO_SPLIT) chunks = MAX_CACHE_IO_SPLIT;
+
+    // Expert blobs are page-cache-backed. Keep chunk boundaries page aligned
+    // so fanout mode still matches the underlying VM layout.
+    const size_t page_bytes = 16 * 1024;
+    if (esz == 0 || (esz % page_bytes) != 0) return 1;
+
+    size_t pages = esz / page_bytes;
+    if ((size_t)chunks > pages) chunks = (int)pages;
+    if (chunks < 1) chunks = 1;
+    return chunks;
+}
+
 typedef struct {
-    InferPreadTask tasks[MAX_K];
+    InferPreadTask tasks[MAX_K * MAX_CACHE_IO_SPLIT];
     int num_tasks;
+    int num_experts;
+    int chunks_per_expert;
     int valid[MAX_K];
     dispatch_group_t group;
     int active;
@@ -3550,12 +3592,19 @@ static AsyncPreadState g_async_pread = {0};
 static void async_pread_start(int packed_fd, int *expert_indices, int K,
                                id<MTLBuffer> __strong *dst_bufs, const void *mmap_base,
                                int layer_idx) {
+    (void)mmap_base;
     size_t esz = active_expert_size();
-    g_async_pread.num_tasks = K;
+    int chunks = active_cache_io_split(esz);
+    const size_t page_bytes = 16 * 1024;
+
+    g_async_pread.num_experts = K;
+    g_async_pread.chunks_per_expert = chunks;
+    g_async_pread.num_tasks = K * chunks;
     g_async_pread.active = 1;
     if (!g_async_pread.group) g_async_pread.group = dispatch_group_create();
 
     for (int k = 0; k < K; k++) {
+        // Per-expert offset and size (tiered: variable, uniform: computed from index)
         size_t this_esz;
         off_t this_offset;
         if (g_use_tiered && g_tiered_manifest) {
@@ -3566,18 +3615,40 @@ static void async_pread_start(int packed_fd, int *expert_indices, int K,
             this_esz = esz;
             this_offset = (off_t)expert_indices[k] * esz;
         }
-        g_async_pread.tasks[k].fd = packed_fd;
-        g_async_pread.tasks[k].dst = [dst_bufs[k] contents];
-        g_async_pread.tasks[k].offset = this_offset;
-        g_async_pread.tasks[k].size = this_esz;
-        g_async_pread.tasks[k].result = 0;
+
+        size_t total_pages = (chunks > 1) ? (this_esz / page_bytes) : 0;
+        char *dst_base = (char *)[dst_bufs[k] contents];
+        size_t page_cursor = 0;
+        for (int c = 0; c < chunks; c++) {
+            size_t chunk_off = 0;
+            size_t chunk_sz = this_esz;
+            if (chunks > 1) {
+                size_t pages_this_chunk = total_pages / (size_t)chunks;
+                if ((size_t)c < (total_pages % (size_t)chunks)) pages_this_chunk++;
+                chunk_off = page_cursor * page_bytes;
+                chunk_sz = pages_this_chunk * page_bytes;
+                page_cursor += pages_this_chunk;
+            }
+
+            int task_idx = k * chunks + c;
+            g_async_pread.tasks[task_idx].fd = packed_fd;
+            g_async_pread.tasks[task_idx].dst = dst_base + chunk_off;
+            g_async_pread.tasks[task_idx].offset = this_offset + (off_t)chunk_off;
+            g_async_pread.tasks[task_idx].size = chunk_sz;
+            g_async_pread.tasks[task_idx].result = 0;
+            g_async_pread.tasks[task_idx].mmap_base = NULL;
+            g_async_pread.tasks[task_idx].lz4_comp_buf = NULL;
+            g_async_pread.tasks[task_idx].lz4_comp_size = 0;
+        }
     }
 
-    // Fire off parallel preads on GCD — returns immediately
+    // Fire off parallel preads on GCD — dispatch_group guarantees all blocks
+    // complete before dispatch_group_wait returns (no generation counter race).
     static dispatch_queue_t io_q = NULL;
     if (!io_q) io_q = dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0);
-    for (int k = 0; k < K; k++) {
-        InferPreadTask *t = &g_async_pread.tasks[k];
+    int total_tasks = g_async_pread.num_tasks;
+    for (int i = 0; i < total_tasks; i++) {
+        InferPreadTask *t = &g_async_pread.tasks[i];
         dispatch_group_async(g_async_pread.group, io_q, ^{
             t->result = pread(t->fd, t->dst, t->size, t->offset);
         });
@@ -3587,8 +3658,18 @@ static void async_pread_start(int packed_fd, int *expert_indices, int K,
 static void async_pread_wait(void) {
     if (!g_async_pread.active) return;
     dispatch_group_wait(g_async_pread.group, DISPATCH_TIME_FOREVER);
-    for (int k = 0; k < g_async_pread.num_tasks; k++) {
-        g_async_pread.valid[k] = (g_async_pread.tasks[k].result == (ssize_t)g_async_pread.tasks[k].size);
+    // Validate each chunk against its OWN expected size (not uniform esz).
+    // Critical for tiered mode where cold 2-bit experts are smaller than hot 4-bit.
+    for (int k = 0; k < g_async_pread.num_experts; k++) {
+        int ok = 1;
+        for (int c = 0; c < g_async_pread.chunks_per_expert; c++) {
+            int task_idx = k * g_async_pread.chunks_per_expert + c;
+            if (g_async_pread.tasks[task_idx].result != (ssize_t)g_async_pread.tasks[task_idx].size) {
+                ok = 0;
+                break;
+            }
+        }
+        g_async_pread.valid[k] = ok;
     }
     g_async_pread.active = 0;
 }
@@ -7373,19 +7454,37 @@ int main(int argc, char **argv) {
                 fcntl(layer_fds[i], F_RDAHEAD, 0);
                 struct stat st;
                 if (fstat(layer_fds[i], &st) == 0 && st.st_size > 0) {
-                    layer_mmaps[i] = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, layer_fds[i], 0);
+#if TARGET_OS_IPHONE || TARGET_OS_IOS
+                    // iOS: never mmap expert files. The async pread path (GCD dispatch_group)
+                    // doesn't use mmap, and mmap'ing ~18GB+ of expert layer files exhausts
+                    // iOS virtual address space (limited even with extended-virtual-addressing).
+                    (void)st;
+#else
+                    if (g_cache_io_split <= 1) {
+                        // macOS: mmap when fanout is disabled. With cache-io-split the
+                        // pread fanout path is used exclusively and mmap just wastes
+                        // virtual address space and adds VM overhead.
+                        layer_mmaps[i] = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, layer_fds[i], 0);
+                    }
+#endif
                     if (layer_mmaps[i] != MAP_FAILED) {
                         layer_mmap_sizes[i] = st.st_size;
-                        // No madvise: kernel default is best.
-                        // MADV_RANDOM disables readahead (tested: hurts).
-                        // MADV_SEQUENTIAL doesn't reduce I/O fragmentation (tested: no effect).
-                        // The kernel fragments 3.9MB preads into ~5.7 disk ops regardless
-                        // of hints — this is inherent to the page cache's physical page layout.
                     }
                 }
             }
         }
-        printf("[experts] %d/%d packed layer files available (mmap'd)\n", expert_layers_available, cfg.num_layers);
+        const char *io_mode;
+#if TARGET_OS_IPHONE || TARGET_OS_IOS
+        io_mode = g_cache_io_split > 1 ? "pread fanout" : "pread (no mmap)";
+#else
+        io_mode = g_cache_io_split > 1 ? "pread fanout" : "mmap'd";
+#endif
+        printf("[experts] %d/%d packed layer files available (%s)\n",
+               expert_layers_available, cfg.num_layers, io_mode);
+        if (g_cache_io_split > 1) {
+            printf("[fanout] cache-io-split=%d → %d page-aligned chunks per expert\n",
+                   g_cache_io_split, active_cache_io_split(active_expert_size()));
+        }
 
         // ---- LZ4 compressed experts: auto-detect and load ----
         {
