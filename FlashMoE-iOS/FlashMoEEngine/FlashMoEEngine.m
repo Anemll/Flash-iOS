@@ -117,24 +117,36 @@ int flashmoe_load(FlashMoEContext *ctx, const FlashMoEConfig *config) {
             cfg.max_seq_len = config->max_context;
         }
         // iOS: adaptive context length based on available device memory
-        // KV cost per position = num_kv_heads * head_dim * 4 bytes * 2 (k+v) * num_full_attn_layers * 2 (CPU+GPU)
+        // Must account for: weight file (mmap'd), Metal buffers, delta-net state, KV caches
         {
             size_t avail = os_proc_available_memory();
             size_t kv_cost_per_pos = (size_t)cfg.num_kv_heads * cfg.head_dim * sizeof(float)
                                      * 2  // k + v
                                      * cfg.num_full_attn_layers
                                      * 2; // CPU + GPU mirror
-            // Budget: 25% of available memory for KV caches
-            size_t kv_budget = avail / 4;
-            int adaptive_max = (int)(kv_budget / kv_cost_per_pos);
-            // Clamp to powers of 2 for clean allocation: 512, 1024, 2048, 4096, 8192
+
+            // Estimate non-KV Metal memory:
+            //   delta-net: num_linear_layers * v_heads * v_dim * k_dim * 4
+            //   multi-expert: MAX_K * 2 * expert_size
+            //   working buffers: ~50 MB
+            size_t delta_net_bytes = (size_t)cfg.num_linear_layers *
+                cfg.linear_num_v_heads * cfg.linear_value_dim * cfg.linear_key_dim * sizeof(float);
+            size_t expert_buf_bytes = (size_t)MAX_K * 2 * cfg.expert_size_4bit;
+            size_t fixed_metal = delta_net_bytes + expert_buf_bytes + 50 * 1024 * 1024;
+
+            // Reserve memory for: fixed Metal + OS headroom (2 GB) + expert page cache (at least 1 GB)
+            size_t reserved = fixed_metal + (size_t)3 * 1024 * 1024 * 1024;
+            size_t kv_budget = (avail > reserved) ? (avail - reserved) / 2 : avail / 8;
+
+            int adaptive_max = (kv_cost_per_pos > 0) ? (int)(kv_budget / kv_cost_per_pos) : 8192;
+            // Clamp to powers of 2: 512, 1024, 2048, 4096, 8192
             int capped = 512;
             for (int p = 512; p <= 8192; p *= 2) {
                 if (p <= adaptive_max) capped = p;
             }
             if (cfg.max_seq_len > capped) {
-                NSLog(@"[FlashMoE] Adaptive context: %d → %d (%.0f MB available, KV cost %.0f bytes/pos)",
-                      cfg.max_seq_len, capped, avail / 1e6, (double)kv_cost_per_pos);
+                NSLog(@"[FlashMoE] Adaptive context: %d → %d (%.0f MB available, %.0f MB fixed Metal, KV %.0f bytes/pos)",
+                      cfg.max_seq_len, capped, avail / 1e6, fixed_metal / 1e6, (double)kv_cost_per_pos);
                 cfg.max_seq_len = capped;
             }
         }
@@ -159,6 +171,12 @@ int flashmoe_load(FlashMoEContext *ctx, const FlashMoEConfig *config) {
             }
         } else {
             ctx->K = cfg.num_experts_per_tok;
+        }
+
+        // Safety: cap K to MAX_K to prevent buffer overflow on multi-expert buffers
+        if (ctx->K > MAX_K) {
+            NSLog(@"[FlashMoE] WARNING: K=%d exceeds MAX_K=%d, capping to %d", ctx->K, MAX_K, MAX_K);
+            ctx->K = MAX_K;
         }
 
         // ---- Build file paths ----

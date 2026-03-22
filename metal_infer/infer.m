@@ -33,7 +33,7 @@
  *   This allows the next layer's CMD1 to submit immediately without waiting
  *   for CMD3 completion — the GPU queue serializes CMD3(N-1) then CMD1(N).
  *   Saves ~0.83ms/layer deferred_wait + CPU combine + input_norm overhead.
- *   Multi-expert buffers (MAX_K=8 independent slots) allow all K expert
+ *   Multi-expert buffers (MAX_K=16 independent slots) allow all K expert
  *   forwards to be encoded into a single command buffer.
  *   Batched encoding: 2 encoders per expert (gate+up fused, SwiGLU+down fused)
  *   + 2 for shared expert = K*2 + 2 total encoders in CMD3.
@@ -559,7 +559,7 @@ typedef struct {
     uint32_t raw_size;
 } LZ4IndexEntry;
 
-static void *g_lz4_comp_bufs[8];                 // pre-allocated compressed read buffers (MAX_K=8)
+static void *g_lz4_comp_bufs[16];                 // pre-allocated compressed read buffers (matches MAX_K)
 static int g_use_lz4 = 0;                        // auto-detected from packed_experts_lz4/
 
 // ============================================================================
@@ -1381,7 +1381,7 @@ typedef struct {
     // Each expert k uses slot [k].
     // Double-buffered: set A (data) for GPU compute, set B (data_B) for background pread.
     // Gate/up/act/out only need one set (GPU uses them after pread completes).
-    #define MAX_K 8
+    #define MAX_K 16
     id<MTLBuffer> buf_multi_expert_data[MAX_K];   // [cfg.expert_size_4bit bytes] each — buffer set A
     id<MTLBuffer> buf_multi_expert_data_B[MAX_K]; // [cfg.expert_size_4bit bytes] each — buffer set B (prefetch)
     id<MTLBuffer> buf_multi_expert_gate[MAX_K];   // [cfg.moe_intermediate floats]
@@ -7174,8 +7174,14 @@ int main(int argc, char **argv) {
         alloc_tracking_arrays();
         g_deferred.h_mid = calloc(cfg.hidden_dim, sizeof(float));
 
+        // Cap K to MAX_K (buffer overflow safety)
+        if (K > MAX_K) {
+            fprintf(stderr, "WARNING: K=%d exceeds MAX_K=%d, capping to %d\n", K, MAX_K, MAX_K);
+            K = MAX_K;
+        }
+
         // Build default paths — check model directory first, then relative paths
-        char default_weights[1024], default_manifest[1024], default_vocab[1024];
+        char default_weights[1024] = {0}, default_manifest[1024] = {0}, default_vocab[1024] = {0};
 
         if (!weights_path) {
             // 1. Try <model_path>/model_weights.bin
