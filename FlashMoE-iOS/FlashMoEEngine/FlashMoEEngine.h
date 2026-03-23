@@ -36,10 +36,7 @@ typedef struct {
     int max_context;            // Max sequence length (0 = use model default)
     int think_budget;           // Max thinking tokens (0 = unlimited)
     int use_tiered;             // 1 = use tiered quantization if available, 0 = auto-detect
-    int use_2bit;               // 1 = force 2-bit experts, 0 = auto-detect from directory
-    int active_experts_k;       // Override K (experts per token). 0 = use model default.
-                                // Reducing K cuts I/O proportionally (e.g. K=4 on a K=10 model
-                                // reduces expert reads by 60%). Quality degrades gracefully.
+    int use_2bit;               // 1 = use 2-bit experts (packed_experts_2bit/)
     int cache_io_split;         // >1 = split each expert pread into N page-aligned chunks (fanout), 0/1 = disabled
     int verbose;                // 1 = log to stderr, 0 = quiet
 } FlashMoEConfig;
@@ -49,10 +46,20 @@ typedef struct {
     // Model info
     char model_name[256];
     int num_layers;
+    int num_linear_layers;
+    int num_full_attn_layers;
     int num_experts;
     int active_experts_k;
     int hidden_dim;
     int vocab_size;
+    int num_attn_heads;
+    int num_kv_heads;
+    int head_dim;
+    int moe_intermediate;
+    int expert_quant_bits;      // 2, 3, or 4
+    int dense_quant_bits;       // dense/shared expert quantization (typically 4)
+    float dense_avg_bits;       // effective avg bits/param for dense weights
+    int is_smoke_test;          // 1 if num_experts < 512
 
     // Generation stats
     double tokens_per_second;
@@ -64,6 +71,7 @@ typedef struct {
     size_t weight_file_bytes;   // Non-expert weights (mmap'd)
     size_t expert_file_bytes;   // Total expert data on disk
     size_t metal_buffer_bytes;  // GPU buffer allocation
+    size_t expert_size_each;    // Single expert size in bytes
 } FlashMoEStats;
 
 // ---- Lifecycle ----
@@ -115,6 +123,24 @@ void flashmoe_reset(FlashMoEContext *ctx);
 
 // Get current engine stats. Fills the provided struct.
 void flashmoe_get_stats(FlashMoEContext *ctx, FlashMoEStats *stats);
+
+// ---- Profiling ----
+
+// Run a short timing profile: generates N tokens with --timing enabled.
+// Returns a malloc'd string with the timing report (caller must free).
+// Returns NULL on error.
+char *flashmoe_run_profile(FlashMoEContext *ctx, int num_tokens);
+
+// Enable timing accumulation (call before generate)
+void flashmoe_timing_enable(FlashMoEContext *ctx);
+
+// Build timing report string (call after generate). Caller must free().
+char *flashmoe_timing_report(FlashMoEContext *ctx);
+
+// ---- Optimization toggles (for A/B profiling) ----
+void flashmoe_set_gpu_combine(int enabled);     // fused CMD3 combine+residual+norm
+void flashmoe_set_gpu_linear_attn(int enabled);  // fused GPU attention (delta-net)
+void flashmoe_set_expert_prefetch(int enabled);   // async parallel pread
 
 // ---- Utility ----
 

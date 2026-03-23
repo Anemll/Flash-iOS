@@ -174,21 +174,21 @@ struct ProfilerView: View {
                 )
                 metricCell(
                     icon: "speedometer",
-                    label: "tok/s",
+                    label: engine.tokensGenerated < 0 ? "prefill t/s" : "tok/s",
                     value: String(format: "%.1f", engine.tokensPerSecond)
                 )
                 metricCell(
                     icon: "number",
-                    label: "Tokens",
-                    value: "\(engine.tokensGenerated)"
+                    label: engine.tokensGenerated < 0 ? "Prefill" : "Tokens",
+                    value: engine.tokensGenerated < 0
+                        ? "\(-engine.tokensGenerated) tok"
+                        : "\(engine.tokensGenerated)"
                 )
                 metricCell(
                     icon: "timer",
                     label: "TTFT",
                     value: engine.timeToFirstToken > 0
-                        ? (engine.timeToFirstToken > 500_000
-                            ? String(format: "%.1f min", engine.timeToFirstToken / 60_000)
-                            : String(format: "%.0f ms", engine.timeToFirstToken))
+                        ? String(format: "%.0f ms", engine.timeToFirstToken)
                         : "--"
                 )
             }

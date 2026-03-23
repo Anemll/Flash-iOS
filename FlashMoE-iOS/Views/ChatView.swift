@@ -28,8 +28,13 @@ struct ChatView: View {
     @State private var inputText = ""
     @State private var isGenerating = false
     @State private var showStats = false
+    @AppStorage("chatTemplateEnabled") private var chatTemplateEnabled: Bool = true
+    @AppStorage("maxGenerationTokens") private var maxGenerationTokens: Int = 2048
     @State private var showModelInfo = false
     @State private var showProfiler = false
+    @State private var isProfileRunning = false
+    @State private var profileResult: String?
+    @State private var showProfileResult = false
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -60,9 +65,15 @@ struct ChatView: View {
                 StatsBar(
                     tokensPerSecond: engine.tokensPerSecond,
                     tokensGenerated: engine.tokensGenerated,
-                    isGenerating: isGenerating,
-                    ttftMs: engine.timeToFirstToken
+                    isGenerating: isGenerating
                 )
+            }
+
+            // Profiler panel (between messages and input)
+            if showProfiler {
+                Divider()
+                ProfilerView(engine: engine)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
             Divider()
@@ -94,13 +105,6 @@ struct ChatView: View {
             .padding(.horizontal)
             .padding(.vertical, 8)
         }
-        .overlay(alignment: .bottom) {
-            if showProfiler {
-                ProfilerView(engine: engine)
-                    .padding(.bottom, 80)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
         .animation(.easeInOut(duration: 0.25), value: showProfiler)
         .navigationTitle("Flash-MoE")
 #if os(iOS)
@@ -123,6 +127,13 @@ struct ChatView: View {
                     Button("Show Stats", systemImage: "chart.bar") {
                         showStats.toggle()
                     }
+                    Divider()
+                    Button {
+                        runTimingProfile()
+                    } label: {
+                        Label(isProfileRunning ? "Profiling..." : "Run Timing Profile", systemImage: "timer")
+                    }
+                    .disabled(isGenerating || isProfileRunning)
                     Divider()
                     Button("Models & Settings", systemImage: "gearshape") {
                         messages.removeAll()
@@ -154,6 +165,13 @@ struct ChatView: View {
                         showStats.toggle()
                     }
                     Divider()
+                    Button {
+                        runTimingProfile()
+                    } label: {
+                        Label(isProfileRunning ? "Profiling..." : "Run Timing Profile", systemImage: "timer")
+                    }
+                    .disabled(isGenerating || isProfileRunning)
+                    Divider()
                     Button("Models & Settings", systemImage: "gearshape") {
                         messages.removeAll()
                         engine.reset()
@@ -167,6 +185,9 @@ struct ChatView: View {
 #endif
         .sheet(isPresented: $showModelInfo) {
             ModelInfoSheet(info: engine.modelInfo)
+        }
+        .sheet(isPresented: $showProfileResult) {
+            ProfileResultSheet(result: profileResult ?? "")
         }
     }
 
@@ -189,15 +210,17 @@ struct ChatView: View {
 
             if engine.canContinue {
                 // Reuse KV cache — only process the new user turn
-                stream = engine.generateContinuation(userMessage: text, maxTokens: 500)
+                stream = engine.generateContinuation(userMessage: text, maxTokens: maxGenerationTokens)
             } else {
                 // First message — full chat template with system prompt
                 let formattedPrompt = buildChatPrompt(userMessage: text)
-                stream = engine.generate(prompt: formattedPrompt, maxTokens: 500)
+                stream = engine.generate(prompt: formattedPrompt, maxTokens: maxGenerationTokens)
             }
 
             var gotTokens = false
             for await token in stream {
+                // Skip prefill progress tokens (negative tokensGenerated)
+                if token.tokensGenerated < 0 { continue }
                 gotTokens = true
                 // Strip special tokens that leak through
                 let clean = token.text
@@ -213,8 +236,9 @@ struct ChatView: View {
             if !gotTokens && engine.canContinue {
                 engine.reset()
                 let formattedPrompt = buildChatPrompt(userMessage: text)
-                let fallbackStream = engine.generate(prompt: formattedPrompt, maxTokens: 500)
+                let fallbackStream = engine.generate(prompt: formattedPrompt, maxTokens: maxGenerationTokens)
                 for await token in fallbackStream {
+                    if token.tokensGenerated < 0 { continue }
                     let clean = token.text
                         .replacingOccurrences(of: "<|im_end|>", with: "")
                         .replacingOccurrences(of: "<|im_start|>", with: "")
@@ -229,8 +253,58 @@ struct ChatView: View {
         }
     }
 
+    private func runTimingProfile() {
+        isProfileRunning = true
+        isGenerating = true
+        showProfiler = true  // auto-show profiler panel during run
+
+        // Add profile prompt as a user message in chat
+        let profilePrompt = "What is Apple Neural Engine?"
+        let userMsg = ChatMessage(role: .user, text: "[Profile] \(profilePrompt)", timestamp: Date())
+        messages.append(userMsg)
+
+        // Add assistant message for streaming tokens
+        let assistantMsg = ChatMessage(role: .assistant, text: "", timestamp: Date())
+        messages.append(assistantMsg)
+        let assistantIndex = messages.count - 1
+
+        Task {
+            // Enable timing, reset state for clean run
+            engine.reset()
+            engine.enableTiming()
+
+            // Stream tokens — profiler panel updates live via engine.tokensPerSecond
+            let prompt = buildChatPrompt(userMessage: profilePrompt)
+            let stream = engine.generate(prompt: prompt, maxTokens: 40)
+
+            for await token in stream {
+                if token.tokensGenerated < 0 { continue }
+                let clean = token.text
+                    .replacingOccurrences(of: "<|im_end|>", with: "")
+                    .replacingOccurrences(of: "<|im_start|>", with: "")
+                    .replacingOccurrences(of: "<|endoftext|>", with: "")
+                if !clean.isEmpty {
+                    messages[assistantIndex].text += clean
+                }
+            }
+
+            // Build report after generation completes
+            let result = engine.buildTimingReport()
+            profileResult = result
+            isProfileRunning = false
+            isGenerating = false
+            showProfileResult = true
+        }
+    }
+
     /// Format conversation as Qwen chat template
     private func buildChatPrompt(userMessage: String) -> String {
+        // Chat template can be disabled in settings (e.g. for smoke test models)
+        if !chatTemplateEnabled {
+            NSLog("[chat] chat template disabled — sending raw prompt")
+            return userMessage
+        }
+
         var prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
 
         // Include conversation history (skip the empty assistant message we just appended)
@@ -313,7 +387,7 @@ struct MessageBubble: View {
                         #if os(iOS)
                         .background(message.role == .user ? Color.blue : Color(.systemGray5))
                         #else
-                        .background(message.role == .user ? Color.blue : Color.secondary)
+                        .background(message.role == .user ? Color.blue : Color.secondary.opacity(0.3))
                         #endif
                         .foregroundStyle(message.role == .user ? .white : .primary)
                         .clipShape(RoundedRectangle(cornerRadius: 18))
@@ -326,7 +400,7 @@ struct MessageBubble: View {
                         #if os(iOS)
                         .background(Color(.systemGray5))
                         #else
-                        .background(.quaternary)
+                        .background(Color.secondary.opacity(0.3))
                         #endif
                         .clipShape(RoundedRectangle(cornerRadius: 18))
                 }
@@ -365,46 +439,24 @@ struct StatsBar: View {
     let tokensPerSecond: Double
     let tokensGenerated: Int
     let isGenerating: Bool
-    var ttftMs: Double = 0
-
-    private var ttftText: String {
-        if ttftMs <= 0 { return "" }
-        if ttftMs > 500_000 {
-            return String(format: "%.1f min", ttftMs / 60_000)
-        } else if ttftMs > 1000 {
-            return String(format: "%.1fs", ttftMs / 1000)
-        } else {
-            return String(format: "%.0fms", ttftMs)
-        }
-    }
-
-    private var thermalLabel: String {
-        switch ProcessInfo.processInfo.thermalState {
-        case .nominal:  return "\u{1F7E2} Cool"
-        case .fair:     return "\u{1F7E1} Warm"
-        case .serious:  return "\u{1F7E0} Hot"
-        case .critical: return "\u{1F534} Critical"
-        @unknown default: return "\u{2753} Unknown"
-        }
-    }
 
     var body: some View {
-        HStack(spacing: 12) {
-            Label(String(format: "%.1f tok/s", tokensPerSecond), systemImage: "speedometer")
+        HStack(spacing: 16) {
+            Label(
+                tokensGenerated < 0
+                    ? String(format: "prefill %.1f tok/s", tokensPerSecond)
+                    : String(format: "%.1f tok/s", tokensPerSecond),
+                systemImage: "speedometer"
+            )
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            Label("\(tokensGenerated) tokens", systemImage: "number")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            if !ttftText.isEmpty {
-                Label(ttftText, systemImage: "clock")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Text(thermalLabel)
+            Label(
+                tokensGenerated < 0
+                    ? "prefill \(-tokensGenerated) tok"
+                    : "\(tokensGenerated) tokens",
+                systemImage: "number"
+            )
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -431,25 +483,53 @@ struct ModelInfoSheet: View {
         NavigationStack {
             if let info {
                 List {
-                    Section("Architecture") {
-                        InfoRow(label: "Layers", value: "\(info.numLayers)")
-                        InfoRow(label: "Experts", value: "\(info.numExperts) (K=\(info.activeExpertsK))")
-                        InfoRow(label: "Hidden Dim", value: "\(info.hiddenDim)")
-                        InfoRow(label: "Vocab Size", value: "\(info.vocabSize)")
+                    Section("Model") {
+                        let folderName = (info.name as NSString).lastPathComponent
+                        InfoRow(label: "Name", value: folderName)
+                        InfoRow(label: "Parameters", value: info.estimatedParams)
+                        InfoRow(label: "Routed Experts", value: info.quantLabel)
+                        InfoRow(label: "Dense/Shared", value: info.denseQuantLabel)
+                        if info.isSmokeTest {
+                            InfoRow(label: "Mode", value: "Smoke Test (\(info.numExperts)/512)")
+                        }
                     }
+
+                    Section("Architecture") {
+                        InfoRow(label: "Layers", value: "\(info.numLayers) (\(info.numLinearLayers) linear + \(info.numFullAttnLayers) full attn)")
+                        InfoRow(label: "Experts", value: "\(info.numExperts) total, K=\(info.activeExpertsK) active/layer")
+                        InfoRow(label: "Hidden Dim", value: "\(info.hiddenDim)")
+                        InfoRow(label: "Attn Heads", value: "\(info.numAttnHeads) Q / \(info.numKVHeads) KV (dim \(info.headDim))")
+                        InfoRow(label: "MoE FFN Dim", value: "\(info.moeIntermediate)")
+                        InfoRow(label: "Vocab", value: String(format: "%,d", info.vocabSize))
+                    }
+
                     Section("Storage") {
-                        InfoRow(label: "Weights", value: String(format: "%.1f MB", info.weightFileMB))
-                        InfoRow(label: "Experts", value: String(format: "%.1f MB", info.expertFileMB))
-                        InfoRow(label: "Total", value: String(format: "%.1f GB", info.totalSizeMB / 1024))
+                        InfoRow(label: "Dense Weights", value: String(format: "%.2f GB", info.weightFileMB / 1024))
+                        InfoRow(label: "Expert Data", value: String(format: "%.1f GB", info.expertFileMB / 1024))
+                        InfoRow(label: "Per Expert", value: String(format: "%.2f MB", info.expertSizeEachMB))
+                        InfoRow(label: "Total on Disk", value: String(format: "%.1f GB", info.totalSizeGB))
+                    }
+
+                    Section("Runtime") {
+                        InfoRow(label: "GPU Buffers", value: String(format: "%.0f MB", Double(info.metalBufferBytes) / 1_048_576))
+                        InfoRow(label: "I/O per Token", value: String(format: "%.2f GB", info.expertSizeEachMB * Double(info.activeExpertsK) * Double(info.numLayers) / 1024))
                     }
                 }
                 .navigationTitle("Model Info")
             } else {
-                Text("No model loaded")
+                VStack(spacing: 12) {
+                    Image(systemName: "cpu")
+                        .font(.largeTitle)
+                        .foregroundStyle(.secondary)
+                    Text("No model loaded")
+                        .foregroundStyle(.secondary)
+                }
             }
         }
 #if os(iOS)
-        .presentationDetents([.medium])
+        .presentationDetents([.medium, .large])
+#else
+        .frame(minWidth: 400, minHeight: 450)
 #endif
     }
 }

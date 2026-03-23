@@ -6,7 +6,6 @@
  */
 
 import SwiftUI
-import UniformTypeIdentifiers
 
 // MARK: - Local Model Entry
 
@@ -31,15 +30,13 @@ struct ModelListView: View {
     @State private var isScanning = true
     @State private var loadError: String?
     @State private var selectedModel: LocalModel?
-    @AppStorage("cacheIOSplit") private var cacheIOSplit: Int = 1
-    @AppStorage("activeExpertsK") private var activeExpertsK: Int = 0
-    @State private var showFilePicker = false
-    @State private var modelToExport: LocalModel? = nil
-    @State private var importedBookmark: Data? = nil
-    @State private var showImportActionAlert = false
-    @State private var pendingImportURL: URL? = nil
-    @State private var importProgress: String? = nil
-    @State private var modelToDelete: LocalModel? = nil
+    @AppStorage("cacheIOSplit") private var cacheIOSplit: Int = 4
+    @AppStorage("chatTemplateEnabled") private var chatTemplateEnabled: Bool = true
+    @AppStorage("lastModelPath") private var lastModelPath: String = ""
+    @AppStorage("maxGenerationTokens") private var maxGenerationTokens: Int = 2048
+    @AppStorage("gpuCombineEnabled") private var gpuCombineEnabled: Bool = true
+    @AppStorage("gpuLinearAttnEnabled") private var gpuLinearAttnEnabled: Bool = true
+    @AppStorage("expertPrefetchEnabled") private var expertPrefetchEnabled: Bool = true
     private let downloadManager = DownloadManager.shared
 
     var body: some View {
@@ -73,21 +70,6 @@ struct ModelListView: View {
                     ForEach(localModels) { model in
                         ModelRow(model: model, isLoading: engine.state == .loading && selectedModel?.id == model.id)
                             .onTapGesture { loadModel(model) }
-                            .swipeActions(edge: .leading) {
-                                Button {
-                                    modelToExport = model
-                                } label: {
-                                    Label("Move to Files", systemImage: "square.and.arrow.up")
-                                }
-                                .tint(.blue)
-                            }
-                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                Button(role: .destructive) {
-                                    modelToDelete = model
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                            }
                     }
                 }
             }
@@ -105,22 +87,7 @@ struct ModelListView: View {
                 }
             }
 
-            Section("Expert Settings") {
-                Picker("Active Experts (K)", selection: $activeExpertsK) {
-                    Text("Model default").tag(0)
-                    Text("K=2 (fastest, lowest quality)").tag(2)
-                    Text("K=4").tag(4)
-                    Text("K=6").tag(6)
-                    Text("K=8").tag(8)
-                    Text("K=10 (full quality)").tag(10)
-                }
-                .pickerStyle(.menu)
-                if activeExpertsK > 0 {
-                    Text("Uses \(activeExpertsK) experts per token instead of the model default. Lower = faster but less accurate. Reload model to apply.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
+            Section("I/O Settings") {
                 Picker("Expert I/O Fanout", selection: $cacheIOSplit) {
                     Text("Off (single pread)").tag(1)
                     Text("2 chunks").tag(2)
@@ -133,6 +100,45 @@ struct ModelListView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            Section("Chat Settings") {
+                Toggle("Chat Template", isOn: $chatTemplateEnabled)
+                Text("Wraps prompts in Qwen chat format (<|im_start|>). Disable for smoke test models or raw text mode.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Generation") {
+                Picker("Max Tokens", selection: $maxGenerationTokens) {
+                    Text("256").tag(256)
+                    Text("512").tag(512)
+                    Text("1024").tag(1024)
+                    Text("2048").tag(2048)
+                    Text("4096").tag(4096)
+                }
+                .pickerStyle(.menu)
+                Text("Maximum tokens per response. Higher values allow longer replies but take more time.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("GPU Optimizations") {
+                Toggle("Fused CMD3 (combine+norm)", isOn: $gpuCombineEnabled)
+                    .onChange(of: gpuCombineEnabled) { _, val in engine.setGPUCombine(val) }
+                Toggle("GPU Linear Attention", isOn: $gpuLinearAttnEnabled)
+                    .onChange(of: gpuLinearAttnEnabled) { _, val in engine.setGPULinearAttn(val) }
+                Toggle("Expert Prefetch (async pread)", isOn: $expertPrefetchEnabled)
+                    .onChange(of: expertPrefetchEnabled) { _, val in engine.setExpertPrefetch(val) }
+                Text("Disable to measure per-optimization impact via timing profile.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Profile") {
+                Text("Load a model, then use the \(Image(systemName: "ellipsis.circle")) menu in Chat to run a timing profile.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             if let error = downloadManager.error,
@@ -153,75 +159,7 @@ struct ModelListView: View {
             }
         }
         .navigationTitle("Flash-MoE")
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showFilePicker = true
-                } label: {
-                    Label("Import", systemImage: "folder.badge.plus")
-                }
-            }
-        }
-        .sheet(isPresented: $showFilePicker) {
-            FolderImportPicker { url in
-                pendingImportURL = url
-                showImportActionAlert = true
-            }
-        }
-        .alert("Import Model", isPresented: $showImportActionAlert) {
-            Button("Link (Bookmark)") {
-                if let url = pendingImportURL {
-                    handleImportedFolder(url)
-                }
-                pendingImportURL = nil
-            }
-            Button("Move to App (Documents)") {
-                if let url = pendingImportURL {
-                    moveImportedFolderToDocuments(url)
-                }
-                pendingImportURL = nil
-            }
-            Button("Cancel", role: .cancel) {
-                pendingImportURL = nil
-            }
-        } message: {
-            Text("Link keeps the model in its current location. Move to App copies it into the app's Documents folder for better reliability.")
-        }
-        .alert("Delete Model", isPresented: Binding(
-            get: { modelToDelete != nil },
-            set: { if !$0 { modelToDelete = nil } }
-        )) {
-            Button("Delete", role: .destructive) {
-                if let model = modelToDelete {
-                    deleteModel(model)
-                }
-                modelToDelete = nil
-            }
-            Button("Cancel", role: .cancel) { modelToDelete = nil }
-        } message: {
-            Text("Delete \"\(modelToDelete?.name ?? "")\" (\(String(format: "%.1f GB", modelToDelete?.sizeGB ?? 0.0)))? This cannot be undone.")
-        }
-        .sheet(item: $modelToExport) { model in
-            FolderExportPicker(sourceURL: URL(fileURLWithPath: model.path)) { destURL in
-                // moveToService already moved the files — just refresh the model list
-                print("[export] Model moved to: \(destURL.path)")
-                scanForModels()
-            }
-        }
-        .overlay {
-            if let progress = importProgress {
-                VStack(spacing: 12) {
-                    ProgressView()
-                    Text(progress)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(24)
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-            }
-        }
-        .onAppear { scanForModels(); restoreBookmarks() }
+        .onAppear { scanForModels() }
         .refreshable { scanForModels() }
         .onChange(of: downloadManager.activeDownload?.status) { _, newStatus in
             if newStatus == .complete {
@@ -261,212 +199,25 @@ struct ModelListView: View {
     private func loadModel(_ model: LocalModel) {
         guard engine.state != .loading && engine.state != .generating else { return }
         selectedModel = model
-
-        // Use picker value, or auto-detect for 397B if user hasn't set a preference
-        let activeK: Int
-        if activeExpertsK > 0 {
-            activeK = activeExpertsK  // user selected a value
-        } else {
-            // Auto-reduce for 397B on constrained devices
-            let is397B = model.path.lowercased().contains("397b") || model.name.lowercased().contains("397b")
-            let deviceRAM = ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024)
-            activeK = (is397B && deviceRAM <= 16) ? 4 : 0
-        }
+        lastModelPath = model.path
 
         Task {
             do {
                 try await engine.loadModel(
                     at: model.path,
+                    maxContext: 4096,
                     useTiered: model.hasTiered,
-                    activeExpertsK: activeK,
+                    use2bit: model.has2bit && !model.hasTiered && !model.has4bit,
                     cacheIOSplit: cacheIOSplit,
                     verbose: true
                 )
+                // Apply optimization toggles
+                engine.setGPUCombine(gpuCombineEnabled)
+                engine.setGPULinearAttn(gpuLinearAttnEnabled)
+                engine.setExpertPrefetch(expertPrefetchEnabled)
             } catch {
                 // Error state is set by the engine
             }
-        }
-    }
-
-    // MARK: - File Import
-
-    private func handleImportedFolder(_ url: URL) {
-        // Save a security-scoped bookmark so we can access this folder across launches
-        guard url.startAccessingSecurityScopedResource() else {
-            print("ERROR: Failed to access security-scoped resource")
-            return
-        }
-
-        do {
-            let bookmarkData = try url.bookmarkData(
-                options: .minimalBookmark,
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            )
-            // Save bookmark to UserDefaults
-            var bookmarks = UserDefaults.standard.array(forKey: "importedModelBookmarks") as? [Data] ?? []
-            bookmarks.append(bookmarkData)
-            UserDefaults.standard.set(bookmarks, forKey: "importedModelBookmarks")
-
-            print("[import] Bookmarked external model folder: \(url.path)")
-            scanForModels()
-        } catch {
-            print("ERROR: Failed to create bookmark: \(error)")
-        }
-
-        url.stopAccessingSecurityScopedResource()
-    }
-
-    private func deleteModel(_ model: LocalModel) {
-        do {
-            try FileManager.default.removeItem(atPath: model.path)
-            print("[delete] Removed \(model.name) at \(model.path)")
-            scanForModels()
-        } catch {
-            print("ERROR: Failed to delete \(model.name): \(error)")
-        }
-    }
-
-    private func moveImportedFolderToDocuments(_ url: URL) {
-        guard url.startAccessingSecurityScopedResource() else {
-            print("ERROR: Failed to access security-scoped resource for move")
-            return
-        }
-
-        let fm = FileManager.default
-        guard let docsDir = fm.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            url.stopAccessingSecurityScopedResource()
-            return
-        }
-
-        let destURL = docsDir.appendingPathComponent(url.lastPathComponent)
-
-        importProgress = "Moving model to Documents..."
-        print("[import] Moving \(url.path) -> \(destURL.path)")
-
-        Task {
-            do {
-                // moveItem is instant if same filesystem, otherwise it copies
-                try fm.moveItem(at: url, to: destURL)
-                print("[import] Move succeeded")
-            } catch {
-                print("[import] Move failed: \(error). Trying copy...")
-                await MainActor.run { importProgress = "Copying model to Documents (this may take a while)..." }
-                do {
-                    try fm.copyItem(at: url, to: destURL)
-                    print("[import] Copy succeeded")
-                } catch {
-                    print("ERROR: Copy also failed: \(error)")
-                }
-            }
-
-            url.stopAccessingSecurityScopedResource()
-
-            await MainActor.run {
-                importProgress = nil
-                scanForModels()
-            }
-        }
-    }
-
-    private func restoreBookmarks() {
-        guard let bookmarks = UserDefaults.standard.array(forKey: "importedModelBookmarks") as? [Data] else { return }
-
-        for bookmark in bookmarks {
-            var isStale = false
-            if let url = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale) {
-                if !isStale {
-                    _ = url.startAccessingSecurityScopedResource()
-                }
-            }
-        }
-    }
-
-    private func moveModelToExternal(model: LocalModel, destination: URL) {
-        Task {
-            let fm = FileManager.default
-            let destPath = destination.appendingPathComponent(URL(fileURLWithPath: model.path).lastPathComponent)
-
-            guard destination.startAccessingSecurityScopedResource() else {
-                print("ERROR: Cannot access destination")
-                return
-            }
-            defer { destination.stopAccessingSecurityScopedResource() }
-
-            do {
-                // Move (not copy) — instant on same filesystem
-                try fm.moveItem(at: URL(fileURLWithPath: model.path), to: destPath)
-                print("[export] Moved \(model.name) to \(destPath.path)")
-                await MainActor.run { scanForModels() }
-            } catch {
-                print("ERROR: Move failed: \(error). Trying copy instead...")
-                // If move fails (cross-volume), this would be slow for 300GB
-                // but at least it works
-                do {
-                    try fm.copyItem(at: URL(fileURLWithPath: model.path), to: destPath)
-                    try fm.removeItem(at: URL(fileURLWithPath: model.path))
-                    print("[export] Copied + deleted \(model.name) to \(destPath.path)")
-                    await MainActor.run { scanForModels() }
-                } catch {
-                    print("ERROR: Copy also failed: \(error)")
-                }
-            }
-        }
-    }
-}
-
-// MARK: - Folder Import Picker
-
-struct FolderImportPicker: UIViewControllerRepresentable {
-    let onPick: (URL) -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
-
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
-        picker.allowsMultipleSelection = false
-        picker.delegate = context.coordinator
-        return picker
-    }
-
-    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
-
-    class Coordinator: NSObject, UIDocumentPickerDelegate {
-        let onPick: (URL) -> Void
-        init(onPick: @escaping (URL) -> Void) { self.onPick = onPick }
-
-        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            guard let url = urls.first else { return }
-            onPick(url)
-        }
-    }
-}
-
-// MARK: - Folder Export Picker (pick destination to move model to)
-
-struct FolderExportPicker: UIViewControllerRepresentable {
-    let sourceURL: URL
-    let onPick: (URL) -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
-
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        // moveToService: shows full Files browser, user picks destination folder.
-        // iOS moves the directory to the chosen location.
-        let picker = UIDocumentPickerViewController(urls: [sourceURL], in: .moveToService)
-        picker.delegate = context.coordinator
-        return picker
-    }
-
-    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
-
-    class Coordinator: NSObject, UIDocumentPickerDelegate {
-        let onPick: (URL) -> Void
-        init(onPick: @escaping (URL) -> Void) { self.onPick = onPick }
-
-        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            guard let url = urls.first else { return }
-            onPick(url)
         }
     }
 }
@@ -540,35 +291,8 @@ enum ModelScanner {
             await scanDirectory(docsDir.path, into: &models)
         }
 
-        // Scan bookmarked external folders (imported via Files picker)
-        if let bookmarks = UserDefaults.standard.array(forKey: "importedModelBookmarks") as? [Data] {
-            for bookmark in bookmarks {
-                var isStale = false
-                if let url = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale),
-                   !isStale {
-                    let accessed = url.startAccessingSecurityScopedResource()
-                    // Check if the folder itself is a model
-                    if FlashMoEEngine.validateModel(at: url.path) {
-                        let size = directorySize(at: url.path)
-                        let hasTiered = fm.fileExists(atPath: url.appendingPathComponent("packed_experts_tiered/layer_00.bin").path)
-                        let has4bit = fm.fileExists(atPath: url.appendingPathComponent("packed_experts/layer_00.bin").path)
-                        let has2bit = fm.fileExists(atPath: url.appendingPathComponent("packed_experts_2bit/layer_00.bin").path)
-                        models.append(LocalModel(
-                            name: "📁 " + url.lastPathComponent,
-                            path: url.path,
-                            sizeBytes: size,
-                            hasTiered: hasTiered,
-                            has4bit: has4bit,
-                            has2bit: has2bit
-                        ))
-                    } else {
-                        // Scan subdirectories
-                        await scanDirectory(url.path, into: &models)
-                    }
-                    if accessed { url.stopAccessingSecurityScopedResource() }
-                }
-            }
-        }
+        // Note: App Groups container removed — no entitlement configured.
+        // Models are discovered from the Documents directory (accessible via Files.app).
 
         return models.sorted { $0.name < $1.name }
     }
@@ -576,32 +300,49 @@ enum ModelScanner {
     private static func scanDirectory(_ path: String, into models: inout [LocalModel]) async {
         let fm = FileManager.default
 
-        guard let entries = try? fm.contentsOfDirectory(atPath: path) else { return }
+        print("[model-scan] Scanning: \(path)")
+        guard let entries = try? fm.contentsOfDirectory(atPath: path) else {
+            print("[model-scan] ERROR: cannot list \(path)")
+            return
+        }
+        print("[model-scan] Found \(entries.count) entries: \(entries.sorted().joined(separator: ", "))")
 
         for entry in entries {
             let fullPath = (path as NSString).appendingPathComponent(entry)
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: fullPath, isDirectory: &isDir), isDir.boolValue else { continue }
 
-            // Check if it's a valid model
-            if FlashMoEEngine.validateModel(at: fullPath) {
-                // Protect model files from iOS storage optimization / purging
-                excludeFromBackup(URL(fileURLWithPath: fullPath))
-                let size = directorySize(at: fullPath)
-                let hasTiered = fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("packed_experts_tiered/layer_00.bin"))
-                let has4bit = fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("packed_experts/layer_00.bin"))
-                let has2bit = fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("packed_experts_2bit/layer_00.bin"))
-
-                models.append(LocalModel(
-                    name: entry,
-                    path: fullPath,
-                    sizeBytes: size,
-                    hasTiered: hasTiered,
-                    has4bit: has4bit,
-                    has2bit: has2bit
-                ))
+            let valid = FlashMoEEngine.validateModel(at: fullPath)
+            if !valid {
+                // Debug: show why validation failed
+                let hasConfig = fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("config.json"))
+                let hasWeights = fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("model_weights.bin"))
+                let hasManifest = fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("model_weights.json"))
+                let hasExperts4 = fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("packed_experts/layer_00.bin"))
+                let hasExpertsT = fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("packed_experts_tiered/layer_00.bin"))
+                let hasExperts2 = fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("packed_experts_2bit/layer_00.bin"))
+                print("[model-scan] SKIP '\(entry)': config=\(hasConfig) weights=\(hasWeights) manifest=\(hasManifest) experts(4bit=\(hasExperts4) tiered=\(hasExpertsT) 2bit=\(hasExperts2))")
+                continue
             }
+
+            // Protect model files from iOS storage optimization / purging
+            excludeFromBackup(URL(fileURLWithPath: fullPath))
+            let size = directorySize(at: fullPath)
+            let hasTiered = fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("packed_experts_tiered/layer_00.bin"))
+            let has4bit = fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("packed_experts/layer_00.bin"))
+            let has2bit = fm.fileExists(atPath: (fullPath as NSString).appendingPathComponent("packed_experts_2bit/layer_00.bin"))
+
+            print("[model-scan] OK '\(entry)': size=\(size / (1024*1024))MB tiered=\(hasTiered) 4bit=\(has4bit) 2bit=\(has2bit)")
+            models.append(LocalModel(
+                name: entry,
+                path: fullPath,
+                sizeBytes: size,
+                hasTiered: hasTiered,
+                has4bit: has4bit,
+                has2bit: has2bit
+            ))
         }
+        print("[model-scan] Total valid models: \(models.count)")
     }
 
     private static func directorySize(at path: String) -> UInt64 {
@@ -633,5 +374,58 @@ enum ModelScanner {
             var fileURL = fileURL
             try? fileURL.setResourceValues(values)
         }
+    }
+}
+
+// MARK: - Profile Result Sheet
+
+struct ProfileResultSheet: View {
+    let result: String
+    @Environment(\.dismiss) private var dismiss
+
+    /// Extract model name from the report "Model:   xxx" line
+    private var modelName: String {
+        for line in result.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("Model:") {
+                return trimmed.replacingOccurrences(of: "Model:", with: "").trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return ""
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(result)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .navigationTitle(modelName.isEmpty ? "Timing Profile" : "Profile: \(modelName)")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button {
+                        #if os(iOS)
+                        UIPasteboard.general.string = result
+                        #else
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(result, forType: .string)
+                        #endif
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                }
+            }
+        }
+        #if os(iOS)
+        .presentationDetents([.medium, .large])
+        #else
+        .frame(minWidth: 450, minHeight: 400)
+        #endif
     }
 }
