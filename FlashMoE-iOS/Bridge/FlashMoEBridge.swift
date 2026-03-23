@@ -212,6 +212,43 @@ final class FlashMoEEngine: @unchecked Sendable {
         state = .idle
     }
 
+    // MARK: - Profiling
+
+    /// Run timing profile: generates tokens with --timing and returns report (blocking, no streaming)
+    func runProfile(numTokens: Int = 20) async -> String {
+        guard let ctx = context, state == .ready else {
+            return "Error: model not loaded"
+        }
+
+        return await withCheckedContinuation { continuation in
+            engineQueue.async {
+                let resultPtr = flashmoe_run_profile(ctx, Int32(numTokens))
+                if let ptr = resultPtr {
+                    let result = String(cString: ptr)
+                    free(ptr)
+                    continuation.resume(returning: result)
+                } else {
+                    continuation.resume(returning: "Error: profile failed")
+                }
+            }
+        }
+    }
+
+    /// Enable timing accumulation before a streamed generate
+    func enableTiming() {
+        guard let ctx = context else { return }
+        flashmoe_timing_enable(ctx)
+    }
+
+    /// Build timing report after a streamed generate. Disables timing.
+    func buildTimingReport() -> String {
+        guard let ctx = context else { return "Error: no context" }
+        guard let ptr = flashmoe_timing_report(ctx) else { return "Error: report failed" }
+        let result = String(cString: ptr)
+        free(ptr)
+        return result
+    }
+
     // MARK: - Generation
 
     /// Generate tokens from a prompt, returning an AsyncStream of tokens

@@ -31,6 +31,9 @@ struct ChatView: View {
     @AppStorage("chatTemplateEnabled") private var chatTemplateEnabled: Bool = true
     @State private var showModelInfo = false
     @State private var showProfiler = false
+    @State private var isProfileRunning = false
+    @State private var profileResult: String?
+    @State private var showProfileResult = false
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -124,6 +127,13 @@ struct ChatView: View {
                         showStats.toggle()
                     }
                     Divider()
+                    Button {
+                        runTimingProfile()
+                    } label: {
+                        Label(isProfileRunning ? "Profiling..." : "Run Timing Profile", systemImage: "timer")
+                    }
+                    .disabled(isGenerating || isProfileRunning)
+                    Divider()
                     Button("Models & Settings", systemImage: "gearshape") {
                         messages.removeAll()
                         engine.reset()
@@ -154,6 +164,13 @@ struct ChatView: View {
                         showStats.toggle()
                     }
                     Divider()
+                    Button {
+                        runTimingProfile()
+                    } label: {
+                        Label(isProfileRunning ? "Profiling..." : "Run Timing Profile", systemImage: "timer")
+                    }
+                    .disabled(isGenerating || isProfileRunning)
+                    Divider()
                     Button("Models & Settings", systemImage: "gearshape") {
                         messages.removeAll()
                         engine.reset()
@@ -167,6 +184,9 @@ struct ChatView: View {
 #endif
         .sheet(isPresented: $showModelInfo) {
             ModelInfoSheet(info: engine.modelInfo)
+        }
+        .sheet(isPresented: $showProfileResult) {
+            ProfileResultSheet(result: profileResult ?? "")
         }
     }
 
@@ -229,6 +249,50 @@ struct ChatView: View {
             }
 
             isGenerating = false
+        }
+    }
+
+    private func runTimingProfile() {
+        isProfileRunning = true
+        isGenerating = true
+        showProfiler = true  // auto-show profiler panel during run
+
+        // Add profile prompt as a user message in chat
+        let profilePrompt = "What is Apple Neural Engine?"
+        let userMsg = ChatMessage(role: .user, text: "[Profile] \(profilePrompt)", timestamp: Date())
+        messages.append(userMsg)
+
+        // Add assistant message for streaming tokens
+        let assistantMsg = ChatMessage(role: .assistant, text: "", timestamp: Date())
+        messages.append(assistantMsg)
+        let assistantIndex = messages.count - 1
+
+        Task {
+            // Enable timing, reset state for clean run
+            engine.reset()
+            engine.enableTiming()
+
+            // Stream tokens — profiler panel updates live via engine.tokensPerSecond
+            let prompt = buildChatPrompt(userMessage: profilePrompt)
+            let stream = engine.generate(prompt: prompt, maxTokens: 40)
+
+            for await token in stream {
+                if token.tokensGenerated < 0 { continue }
+                let clean = token.text
+                    .replacingOccurrences(of: "<|im_end|>", with: "")
+                    .replacingOccurrences(of: "<|im_start|>", with: "")
+                    .replacingOccurrences(of: "<|endoftext|>", with: "")
+                if !clean.isEmpty {
+                    messages[assistantIndex].text += clean
+                }
+            }
+
+            // Build report after generation completes
+            let result = engine.buildTimingReport()
+            profileResult = result
+            isProfileRunning = false
+            isGenerating = false
+            showProfileResult = true
         }
     }
 

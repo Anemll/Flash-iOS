@@ -30,8 +30,9 @@ struct ModelListView: View {
     @State private var isScanning = true
     @State private var loadError: String?
     @State private var selectedModel: LocalModel?
-    @AppStorage("cacheIOSplit") private var cacheIOSplit: Int = 1
+    @AppStorage("cacheIOSplit") private var cacheIOSplit: Int = 4
     @AppStorage("chatTemplateEnabled") private var chatTemplateEnabled: Bool = true
+    @AppStorage("lastModelPath") private var lastModelPath: String = ""
     private let downloadManager = DownloadManager.shared
 
     var body: some View {
@@ -104,6 +105,12 @@ struct ModelListView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Profile") {
+                Text("Load a model, then use the \(Image(systemName: "ellipsis.circle")) menu in Chat to run a timing profile.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             if let error = downloadManager.error,
                downloadManager.activeDownload == nil {
                 Section {
@@ -162,6 +169,7 @@ struct ModelListView: View {
     private func loadModel(_ model: LocalModel) {
         guard engine.state != .loading && engine.state != .generating else { return }
         selectedModel = model
+        lastModelPath = model.path
 
         Task {
             do {
@@ -332,5 +340,58 @@ enum ModelScanner {
             var fileURL = fileURL
             try? fileURL.setResourceValues(values)
         }
+    }
+}
+
+// MARK: - Profile Result Sheet
+
+struct ProfileResultSheet: View {
+    let result: String
+    @Environment(\.dismiss) private var dismiss
+
+    /// Extract model name from the report "Model:   xxx" line
+    private var modelName: String {
+        for line in result.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("Model:") {
+                return trimmed.replacingOccurrences(of: "Model:", with: "").trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return ""
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(result)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .navigationTitle(modelName.isEmpty ? "Timing Profile" : "Profile: \(modelName)")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button {
+                        #if os(iOS)
+                        UIPasteboard.general.string = result
+                        #else
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(result, forType: .string)
+                        #endif
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                }
+            }
+        }
+        #if os(iOS)
+        .presentationDetents([.medium, .large])
+        #else
+        .frame(minWidth: 450, minHeight: 400)
+        #endif
     }
 }

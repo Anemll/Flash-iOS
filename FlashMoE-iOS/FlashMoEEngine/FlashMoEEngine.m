@@ -17,6 +17,10 @@
 #include "FlashMoEEngine.h"
 #include <stdatomic.h>
 #include <os/proc.h>
+#include <sys/utsname.h>
+#if TARGET_OS_IOS
+#import <UIKit/UIKit.h>
+#endif
 
 // ============================================================================
 // FlashMoEContext — wraps engine state for the public C API
@@ -129,8 +133,9 @@ int flashmoe_load(FlashMoEContext *ctx, const FlashMoEConfig *config) {
         // ---- Load model configuration ----
         config_init_defaults();
 
-        // Set model path for tokenizer lookup
-        g_model_path_for_tokenizer = model_path;
+        // Set model path for tokenizer lookup (strdup: Swift string may be temporary)
+        if (g_model_path_for_tokenizer) free((void *)g_model_path_for_tokenizer);
+        g_model_path_for_tokenizer = strdup(model_path);
 
         // Build manifest path for config loading
         char manifest_path_buf[1024];
@@ -653,6 +658,7 @@ int flashmoe_generate(
                     return ctx->tokens_generated;
                 }
 
+                @autoreleasepool {
                 memcpy(ctx->hidden, embed_batch + (size_t)token_idx * HIDDEN_DIM,
                        HIDDEN_DIM * sizeof(float));
 
@@ -667,6 +673,7 @@ int flashmoe_generate(
                 }
                 discard_deferred_experts();
                 pos++;
+                } // @autoreleasepool — drain Metal objects per prefill token
 
                 // Report prefill progress via callback
                 double prefill_elapsed = now_ms() - prefill_start;
@@ -712,10 +719,7 @@ int flashmoe_generate(
 
         // ---- Final norm + LM head + sample first token ----
         if (ctx->final_norm_w) {
-            float *normed = malloc(HIDDEN_DIM * sizeof(float));
-            cpu_rms_norm(ctx->hidden, ctx->final_norm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
-            memcpy(ctx->hidden, normed, HIDDEN_DIM * sizeof(float));
-            free(normed);
+            cpu_rms_norm(ctx->hidden, ctx->final_norm_w, ctx->hidden, HIDDEN_DIM, RMS_NORM_EPS);
         }
 
         lm_head_forward(ctx->wf, ctx->hidden, ctx->logits);
@@ -760,7 +764,8 @@ int flashmoe_generate(
             if (next_token == THINK_END_TOKEN) in_think = 0;
             if (in_think) think_tokens++;
 
-            // Embed + forward pass
+            // Embed + forward pass (autoreleasepool drains Metal command buffers each token)
+            @autoreleasepool {
             embed_lookup(ctx->wf, next_token, ctx->hidden);
 
             for (int layer = 0; layer < g_cfg.num_layers; layer++) {
@@ -776,15 +781,21 @@ int flashmoe_generate(
             pos++;
 
             // Final norm + LM head
+            double t_lm = 0;
+            if (g_timing_enabled) t_lm = now_ms();
+
             if (ctx->final_norm_w) {
-                float *normed = malloc(HIDDEN_DIM * sizeof(float));
-                cpu_rms_norm(ctx->hidden, ctx->final_norm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
-                memcpy(ctx->hidden, normed, HIDDEN_DIM * sizeof(float));
-                free(normed);
+                    cpu_rms_norm(ctx->hidden, ctx->final_norm_w, ctx->hidden, HIDDEN_DIM, RMS_NORM_EPS);
             }
 
             lm_head_forward(ctx->wf, ctx->hidden, ctx->logits);
             next_token = cpu_argmax(ctx->logits, VOCAB_SIZE);
+
+            if (g_timing_enabled) {
+                g_timing.lm_head += now_ms() - t_lm;
+                g_timing.token_count++;
+            }
+            } // @autoreleasepool — drains Metal command buffers
 
             // Think budget: force end thinking
             if (in_think && g_think_budget > 0 && think_tokens >= g_think_budget) {
@@ -895,6 +906,7 @@ int flashmoe_generate_continuation(
                     return ctx->tokens_generated;
                 }
 
+                @autoreleasepool {
                 memcpy(ctx->hidden, embed_batch + (size_t)token_idx * HIDDEN_DIM,
                        HIDDEN_DIM * sizeof(float));
 
@@ -909,6 +921,7 @@ int flashmoe_generate_continuation(
                 }
                 discard_deferred_experts();
                 pos++;
+                } // @autoreleasepool
             }
         }
 
@@ -938,10 +951,7 @@ int flashmoe_generate_continuation(
 
         // ---- Final norm + LM head + sample first token ----
         if (ctx->final_norm_w) {
-            float *normed = malloc(HIDDEN_DIM * sizeof(float));
-            cpu_rms_norm(ctx->hidden, ctx->final_norm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
-            memcpy(ctx->hidden, normed, HIDDEN_DIM * sizeof(float));
-            free(normed);
+            cpu_rms_norm(ctx->hidden, ctx->final_norm_w, ctx->hidden, HIDDEN_DIM, RMS_NORM_EPS);
         }
 
         lm_head_forward(ctx->wf, ctx->hidden, ctx->logits);
@@ -978,6 +988,7 @@ int flashmoe_generate_continuation(
             if (next_token == THINK_END_TOKEN) in_think = 0;
             if (in_think) think_tokens++;
 
+            @autoreleasepool {
             embed_lookup(ctx->wf, next_token, ctx->hidden);
 
             for (int layer = 0; layer < g_cfg.num_layers; layer++) {
@@ -992,15 +1003,21 @@ int flashmoe_generate_continuation(
             complete_deferred_experts();
             pos++;
 
+            double t_lm2 = 0;
+            if (g_timing_enabled) t_lm2 = now_ms();
+
             if (ctx->final_norm_w) {
-                float *normed = malloc(HIDDEN_DIM * sizeof(float));
-                cpu_rms_norm(ctx->hidden, ctx->final_norm_w, normed, HIDDEN_DIM, RMS_NORM_EPS);
-                memcpy(ctx->hidden, normed, HIDDEN_DIM * sizeof(float));
-                free(normed);
+                    cpu_rms_norm(ctx->hidden, ctx->final_norm_w, ctx->hidden, HIDDEN_DIM, RMS_NORM_EPS);
             }
 
             lm_head_forward(ctx->wf, ctx->hidden, ctx->logits);
             next_token = cpu_argmax(ctx->logits, VOCAB_SIZE);
+
+            if (g_timing_enabled) {
+                g_timing.lm_head += now_ms() - t_lm2;
+                g_timing.token_count++;
+            }
+            } // @autoreleasepool
 
             if (in_think && g_think_budget > 0 && think_tokens >= g_think_budget) {
                 next_token = THINK_END_TOKEN;
@@ -1124,6 +1141,203 @@ void flashmoe_get_stats(FlashMoEContext *ctx, FlashMoEStats *stats) {
     stats->tokens_generated = ctx->tokens_generated;
     stats->total_time_ms = ctx->total_time_ms;
     stats->ttft_ms = ctx->ttft_ms;
+}
+
+// ============================================================================
+// Profiling — run short generation with timing and return report string
+// ============================================================================
+
+// Helper: get device machine identifier (e.g. "iPad16,6")
+static const char *get_device_machine(void) {
+    static char machine[64] = {0};
+    if (machine[0]) return machine;
+    struct utsname u;
+    if (uname(&u) == 0) {
+        strlcpy(machine, u.machine, sizeof(machine));
+    } else {
+        strlcpy(machine, "unknown", sizeof(machine));
+    }
+    return machine;
+}
+
+// Helper: map machine ID to marketing name
+static const char *get_device_name(void) {
+    const char *m = get_device_machine();
+    // iPad Pro M4
+    if (strncmp(m, "iPad16,3", 8) == 0 || strncmp(m, "iPad16,4", 8) == 0) return "iPad Pro 11\" (M4)";
+    if (strncmp(m, "iPad16,5", 8) == 0 || strncmp(m, "iPad16,6", 8) == 0) return "iPad Pro 13\" (M4)";
+    // iPad Air M3
+    if (strncmp(m, "iPad15,3", 8) == 0 || strncmp(m, "iPad15,4", 8) == 0) return "iPad Air 11\" (M3)";
+    if (strncmp(m, "iPad15,5", 8) == 0 || strncmp(m, "iPad15,6", 8) == 0) return "iPad Air 13\" (M3)";
+    // iPad Pro M2
+    if (strncmp(m, "iPad14,5", 8) == 0 || strncmp(m, "iPad14,6", 8) == 0) return "iPad Pro 11\" (M2)";
+    if (strncmp(m, "iPad14,7", 8) == 0 || strncmp(m, "iPad14,8", 8) == 0) return "iPad Pro 12.9\" (M2)";
+    // iPad Air M2
+    if (strncmp(m, "iPad14,10", 9) == 0 || strncmp(m, "iPad14,11", 9) == 0) return "iPad Air 11\" (M2)";
+    // iPad Pro M1
+    if (strncmp(m, "iPad13,4", 8) == 0 || strncmp(m, "iPad13,5", 8) == 0) return "iPad Pro 11\" (M1)";
+    if (strncmp(m, "iPad13,8", 8) == 0 || strncmp(m, "iPad13,9", 8) == 0) return "iPad Pro 12.9\" (M1)";
+    // iPad Air M1
+    if (strncmp(m, "iPad13,16", 9) == 0 || strncmp(m, "iPad13,17", 9) == 0) return "iPad Air (M1)";
+    // iPhone 17 Pro
+    if (strncmp(m, "iPhone18,1", 10) == 0) return "iPhone 17 Pro";
+    if (strncmp(m, "iPhone18,2", 10) == 0) return "iPhone 17 Pro Max";
+    if (strncmp(m, "iPhone18,3", 10) == 0) return "iPhone 17 Air";
+    if (strncmp(m, "iPhone18,4", 10) == 0) return "iPhone 17";
+    // iPhone 16 Pro
+    if (strncmp(m, "iPhone17,1", 10) == 0) return "iPhone 16 Pro";
+    if (strncmp(m, "iPhone17,2", 10) == 0) return "iPhone 16 Pro Max";
+    if (strncmp(m, "iPhone17,3", 10) == 0) return "iPhone 16";
+    // iPhone 15 Pro
+    if (strncmp(m, "iPhone16,1", 10) == 0) return "iPhone 15 Pro";
+    if (strncmp(m, "iPhone16,2", 10) == 0) return "iPhone 15 Pro Max";
+    // Mac (running as Designed for iPad)
+    if (strncmp(m, "arm64", 5) == 0) return "Mac (Apple Silicon)";
+    return m;  // fallback to raw machine ID
+}
+
+// Enable timing accumulation and reset counters
+void flashmoe_timing_enable(FlashMoEContext *ctx) {
+    (void)ctx;
+    g_timing_enabled = 1;
+    memset(&g_timing, 0, sizeof(g_timing));
+}
+
+// Build timing report from accumulated data. Caller must free().
+char *flashmoe_timing_report(FlashMoEContext *ctx) {
+    if (!ctx) return NULL;
+
+    g_timing_enabled = 0;
+
+    char *buf = malloc(8192);
+    if (!buf) return NULL;
+    int pos = 0;
+    int n = g_timing.count;
+    int toks = g_timing.token_count;
+
+    // ---- Device & Model header ----
+    const char *model_path = g_model_path_for_tokenizer ? g_model_path_for_tokenizer : "unknown";
+    const char *model_name = strrchr(model_path, '/');
+    model_name = model_name ? model_name + 1 : model_path;
+
+    uint64_t total_ram = [NSProcessInfo processInfo].physicalMemory;
+    double avail_ram_mb = 0;
+#if TARGET_OS_IOS
+    avail_ram_mb = (double)os_proc_available_memory() / (1024 * 1024);
+#endif
+
+    pos += snprintf(buf + pos, 8192 - pos,
+        "Device:  %s (%s)\n"
+        "RAM:     %.0f GB total, %.0f MB free\n"
+        "OS:      %s %s\n"
+        "Model:   %s\n"
+        "Quant:   %d-bit experts, K=%d\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
+        get_device_name(), get_device_machine(),
+        (double)total_ram / (1024.0 * 1024 * 1024), avail_ram_mb,
+#if TARGET_OS_IOS
+        [[[UIDevice currentDevice] systemName] UTF8String],
+        [[[UIDevice currentDevice] systemVersion] UTF8String],
+#else
+        "macOS",
+        [[[NSProcessInfo processInfo] operatingSystemVersionString] UTF8String],
+#endif
+        model_name,
+        g_use_2bit ? 2 : (g_use_q3_experts ? 3 : 4), ctx->K);
+
+    if (n == 0 || toks == 0) {
+        pos += snprintf(buf + pos, 8192 - pos, "No timing data (%d layers timed, %d tokens)\n", n, toks);
+        return buf;
+    }
+
+    // Per-token decode breakdown
+    double dense_attn_ms = (g_timing.cmd1_submit + g_timing.cmd1_wait + g_timing.cpu_attn) / n * g_cfg.num_layers;
+    double oproj_shared_ms = (g_timing.cmd2_encode + g_timing.cmd2_wait + g_timing.routing_cpu) / n * g_cfg.num_layers;
+    double expert_io_ms = g_timing.expert_io / n * g_cfg.num_layers;
+    double expert_compute_ms = (g_timing.cmd3_encode + g_timing.deferred_wait + g_timing.deferred_cpu) / n * g_cfg.num_layers;
+    double lm_ms = g_timing.lm_head / toks;
+    double total_ms = dense_attn_ms + oproj_shared_ms + expert_io_ms + expert_compute_ms + lm_ms;
+
+    double linear_ms = (g_timing.count_linear > 0) ? g_timing.total_linear / g_timing.count_linear * g_cfg.num_linear_layers : 0;
+    double full_ms = (g_timing.count_full > 0) ? g_timing.total_full / g_timing.count_full * g_cfg.num_full_attn_layers : 0;
+
+    pos += snprintf(buf + pos, 8192 - pos,
+        "\nDecode Breakdown (%d tokens)\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", toks);
+    pos += snprintf(buf + pos, 8192 - pos,
+        "Dense/attn (CMD1):  %5.1f ms  %4.1f%%\n"
+        "  GatedDeltaNet:    %5.1f ms  (%d layers)\n"
+        "  Full attention:   %5.1f ms  (%d layers)\n",
+        dense_attn_ms, 100*dense_attn_ms/total_ms,
+        linear_ms, g_cfg.num_linear_layers,
+        full_ms, g_cfg.num_full_attn_layers);
+    pos += snprintf(buf + pos, 8192 - pos,
+        "o_proj+shared (CMD2): %3.1f ms  %4.1f%%\n",
+        oproj_shared_ms, 100*oproj_shared_ms/total_ms);
+    pos += snprintf(buf + pos, 8192 - pos,
+        "Expert I/O (SSD):   %5.1f ms  %4.1f%%\n",
+        expert_io_ms, 100*expert_io_ms/total_ms);
+    pos += snprintf(buf + pos, 8192 - pos,
+        "Expert compute:     %5.1f ms  %4.1f%%\n",
+        expert_compute_ms, 100*expert_compute_ms/total_ms);
+    pos += snprintf(buf + pos, 8192 - pos,
+        "LM head:            %5.1f ms  %4.1f%%\n",
+        lm_ms, 100*lm_ms/total_ms);
+
+    // Compute effective SSD throughput
+    int expert_size = g_use_2bit ? EXPERT_SIZE_2BIT :
+                      g_use_q3_experts ? EXPERT_SIZE_Q3_HYBRID : EXPERT_SIZE;
+    double io_bytes_per_tok = (double)ctx->K * g_cfg.num_layers * expert_size;
+    double io_gb_per_tok = io_bytes_per_tok / (1024.0 * 1024 * 1024);
+    double ssd_gbps = (expert_io_ms > 0) ? io_gb_per_tok / (expert_io_ms / 1000.0) : 0;
+
+    pos += snprintf(buf + pos, 8192 - pos,
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Total per token:    %5.1f ms  (%.1f tok/s)\n"
+        "TTFT:               %5.0f ms\n"
+        "Expert quant:       %d-bit\n"
+        "Experts:            %d (K=%d)\n"
+        "Expert I/O/tok:     %.2f GB\n"
+        "SSD throughput:     %.1f GB/s\n",
+        total_ms, 1000.0/total_ms,
+        ctx->ttft_ms,
+        g_use_2bit ? 2 : (g_use_q3_experts ? 3 : 4),
+        g_cfg.num_experts, ctx->K,
+        io_gb_per_tok, ssd_gbps);
+
+    // Per-layer avg
+    pos += snprintf(buf + pos, 8192 - pos,
+        "\nPer-Layer Avg (ms):\n"
+        "  deferred_wait:  %6.3f\n"
+        "  cmd1 (submit):  %6.3f\n"
+        "  cmd1 (wait):    %6.3f\n"
+        "  cpu_attn:       %6.3f\n"
+        "  cmd2 (encode):  %6.3f\n"
+        "  cmd2 (wait):    %6.3f\n"
+        "  routing_cpu:    %6.3f\n"
+        "  expert_io:      %6.3f\n"
+        "  cmd3_encode:    %6.3f\n",
+        g_timing.deferred_wait / n,
+        g_timing.cmd1_submit / n,
+        g_timing.cmd1_wait / n,
+        g_timing.cpu_attn / n,
+        g_timing.cmd2_encode / n,
+        g_timing.cmd2_wait / n,
+        g_timing.routing_cpu / n,
+        g_timing.expert_io / n,
+        g_timing.cmd3_encode / n);
+
+    NSLog(@"[profile]\n%s", buf);
+    return buf;
+}
+
+// Convenience: run a self-contained timing profile (blocking)
+char *flashmoe_run_profile(FlashMoEContext *ctx, int num_tokens) {
+    if (!ctx || !ctx->loaded) return NULL;
+    flashmoe_timing_enable(ctx);
+    flashmoe_reset(ctx);
+    flashmoe_generate(ctx, "What is Apple Neural Engine?", num_tokens, NULL, NULL);
+    return flashmoe_timing_report(ctx);
 }
 
 int flashmoe_validate_model(const char *model_path) {
