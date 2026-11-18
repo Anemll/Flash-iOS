@@ -5354,6 +5354,7 @@ typedef struct {
     int chunks_per_expert;
     int generation;
     int valid[MAX_K];
+    size_t expected[MAX_K];  // bytes each expert should read (tiered: its own 4- or 2-bit size)
     int active;
 } AsyncPreadState;
 static AsyncPreadState g_async_pread = {0};
@@ -5383,6 +5384,7 @@ static void async_pread_start(int packed_fd, int *expert_indices, int K,
             this_esz = esz;
             this_offset = (off_t)expert_indices[k] * esz;
         }
+        g_async_pread.expected[k] = this_esz;
 
         size_t total_pages = (chunks > 1) ? (this_esz / page_bytes) : 0;
         char *dst_base = (char *)[dst_bufs[k] contents];
@@ -5417,7 +5419,6 @@ static void async_pread_start(int packed_fd, int *expert_indices, int K,
 static void async_pread_wait(void) {
     if (!g_async_pread.active) return;
     io_pool_wait_generation(g_async_pread.generation);
-    size_t esz = active_expert_size();
     for (int k = 0; k < g_async_pread.num_experts; k++) {
         ssize_t total = 0;
         for (int c = 0; c < g_async_pread.chunks_per_expert; c++) {
@@ -5426,7 +5427,9 @@ static void async_pread_wait(void) {
                 total += g_async_pread.tasks[task_idx].result;
             }
         }
-        g_async_pread.valid[k] = (total == (ssize_t)esz);
+        g_async_pread.valid[k] = (total == (ssize_t)g_async_pread.expected[k]);
+        if (!g_async_pread.valid[k])
+            fprintf(stderr, "WARNING: expert read %zd/%zu bytes; skipped\n", total, g_async_pread.expected[k]);
     }
     g_async_pread.active = 0;
 }
