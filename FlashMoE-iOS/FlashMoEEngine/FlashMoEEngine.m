@@ -100,6 +100,51 @@ static PromptTokens *flashmoe_tokenize_continuation_turn(const char *user_conten
 }
 
 // ============================================================================
+// Sampling. Qwen warns that greedy decoding repeats itself; its recommended
+// settings are temperature 0.7, top-k 20, top-p 0.8 (0.6 / 20 / 0.95 when
+// thinking). Override with FLASH_MOE_TEMP / _TOP_K / _TOP_P; TEMP=0 is greedy.
+// ============================================================================
+
+static float flashmoe_env_float(const char *name, float fallback) {
+    const char *e = getenv(name);
+    return (e && *e) ? (float)atof(e) : fallback;
+}
+
+static int flashmoe_sample(const float *logits, int n) {
+    static float temp = -1, top_p = 0; static int top_k = 0;
+    if (temp < 0) {
+        temp = flashmoe_env_float("FLASH_MOE_TEMP", 0.7f);
+        top_k = (int)flashmoe_env_float("FLASH_MOE_TOP_K", 20);
+        top_p = flashmoe_env_float("FLASH_MOE_TOP_P", 0.8f);
+        if (top_k < 1) top_k = 1;
+        if (top_k > 256) top_k = 256;
+    }
+    if (temp <= 0) return cpu_argmax(logits, n);
+
+    // The top_k largest logits, kept sorted (descending) by insertion.
+    int idx[256]; float val[256]; int m = 0;
+    for (int i = 0; i < n; i++) {
+        float v = logits[i];
+        if (m == top_k && v <= val[m - 1]) continue;
+        int j = (m < top_k) ? m++ : m - 1;
+        while (j > 0 && val[j - 1] < v) { val[j] = val[j - 1]; idx[j] = idx[j - 1]; j--; }
+        val[j] = v; idx[j] = i;
+    }
+    // Softmax over them at the temperature, then keep the smallest set whose
+    // probability reaches top_p.
+    float prob[256], total = 0;
+    for (int j = 0; j < m; j++) { prob[j] = expf((val[j] - val[0]) / temp); total += prob[j]; }
+    float cum = 0; int keep = m;
+    for (int j = 0; j < m; j++) {
+        prob[j] /= total; cum += prob[j];
+        if (cum >= top_p) { keep = j + 1; break; }
+    }
+    float r = (float)arc4random_uniform(1u << 24) / (float)(1u << 24) * cum;
+    for (int j = 0; j < keep; j++) { r -= prob[j]; if (r <= 0) return idx[j]; }
+    return idx[keep - 1];
+}
+
+// ============================================================================
 // Public API Implementation
 // ============================================================================
 
@@ -719,7 +764,7 @@ int flashmoe_generate(
         }
 
         lm_head_forward(ctx->wf, ctx->hidden, ctx->logits);
-        int next_token = cpu_argmax(ctx->logits, VOCAB_SIZE);
+        int next_token = flashmoe_sample(ctx->logits, VOCAB_SIZE);
 
         ctx->ttft_ms = now_ms() - t0;
         ctx->tokens_generated = 1;
@@ -784,7 +829,7 @@ int flashmoe_generate(
             }
 
             lm_head_forward(ctx->wf, ctx->hidden, ctx->logits);
-            next_token = cpu_argmax(ctx->logits, VOCAB_SIZE);
+            next_token = flashmoe_sample(ctx->logits, VOCAB_SIZE);
 
             // Think budget: force end thinking
             if (in_think && g_think_budget > 0 && think_tokens >= g_think_budget) {
@@ -945,7 +990,7 @@ int flashmoe_generate_continuation(
         }
 
         lm_head_forward(ctx->wf, ctx->hidden, ctx->logits);
-        int next_token = cpu_argmax(ctx->logits, VOCAB_SIZE);
+        int next_token = flashmoe_sample(ctx->logits, VOCAB_SIZE);
 
         ctx->ttft_ms = now_ms() - t0;
         ctx->tokens_generated = 1;
@@ -1000,7 +1045,7 @@ int flashmoe_generate_continuation(
             }
 
             lm_head_forward(ctx->wf, ctx->hidden, ctx->logits);
-            next_token = cpu_argmax(ctx->logits, VOCAB_SIZE);
+            next_token = flashmoe_sample(ctx->logits, VOCAB_SIZE);
 
             if (in_think && g_think_budget > 0 && think_tokens >= g_think_budget) {
                 next_token = THINK_END_TOKEN;
